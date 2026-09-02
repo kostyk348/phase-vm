@@ -1,0 +1,12 @@
+# Bennett clean computation: c = a + b, промежуточная ячейка убирается.
+# Граница (ввод): set r0=5, r1=7. Ядро ниже обратимо.
+# После forward:  r2 = 12 (результат), r3 = 0 (чистая), r0/r1 не тронуты.
+#   phase-vm run programs/clean.phase --regs 8 --set r0=5 --set r1=7
+#   phase-vm rev programs/clean.phase --regs 8 --set r0=5 --set r1=7
+set r0 5
+set r1 7
+add r3 r0        # t = a          (r3 = 0: свежая ячейка фазы)
+add r3 r1        # t = a + b
+add r2 r3        # out r2 = a + b (r2 = 0)
+sub r3 r1        # uncompute: a+b-b = a
+sub r3 r0        # t = 0 — ячейка фазы чиста, ничего не "стёрто"

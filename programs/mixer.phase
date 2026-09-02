@@ -1,0 +1,14 @@
+# Чисто обратимый ARX-миксер (add/rotate/xor) — фундамент для #12.
+# Каждый раунд — биекция над r0..r3. Никаких set: проверяй через
+#   phase-vm check programs/mixer.phase
+#   phase-vm roundtrip programs/mixer.phase --trials 1000
+rep 8
+  add r0 r1
+  rotl r1 7
+  xor r1 r0
+  swp r0 r1
+  add r2 r3
+  rotl r3 11
+  xor r3 r2
+  swp r2 r3
+end

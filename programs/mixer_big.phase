@@ -1,0 +1,12 @@
+# Большое чисто обратимое ядро для bench:
+#   phase-vm bench programs/mixer_big.phase --regs 8 --rounds 200
+rep 100000
+  add r0 r1
+  rotl r1 7
+  xor r1 r0
+  swp r0 r1
+  add r2 r3
+  rotl r3 11
+  xor r3 r2
+  swp r2 r3
+end
