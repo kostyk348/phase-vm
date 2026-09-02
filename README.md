@@ -132,6 +132,32 @@ snapshot-подход скопировал бы 39 MiB — здесь 0
 Rollback of a failed batch: **0 log bytes, 0 state copies**, and the final
 state provably equals the commit-only reference simulation (asserted).
 
+## Application: speculative safety-filtered tick control
+
+`examples/spec_control.rs` — a DSO-flavoured tick loop where **a tick is a
+phase**: 7 control candidates per tick are *applied* to the state (integer
+symplectic Euler `v += u; q += v` — a genuinely reversible phase step on
+integers), validated against `|q| ≤ QMAX, |v| ≤ VMAX`, and every rejected
+candidate is unwound by the backward run. No state copies between candidates.
+
+```bash
+cargo run --release --example spec_control
+```
+
+```text
+тиков закоммичено=300000  hold=0  возмущений=7500
+|q|max=1011 (лимит 3000)  |v|max=60 (лимит 60) — инвариант держался всё время
+leaves: fwd=4.8M  rev(отклонённые)=4.2M   (11.8 ns/leaf, 106 ms)
+финал: q=-2, v=0
+MPC-снапшоты скопировали бы 32 MiB — здесь 0 байт логов/копий
+детерминизм: OK (одинаковый seed → одинаковый финал)
+```
+
+Zero-trace rollback is proven per candidate (`assert_eq!` state == base after
+every unwinding); determinism is proven by double-run. External disturbances
+enter as boundaries (inputs, not rolled back) — exactly how real control loops
+treat them.
+
 ## Honest limits
 
 - Reversible semantics live on bits/integers. IEEE-754 rounding/NaN is not
