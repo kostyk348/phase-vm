@@ -107,6 +107,31 @@ PC1: 12-round ARX kernel, 256-bit block/key. Avalanche measured at
 ~0.5 bit-flip rate; instruction stream contains **no data-dependent branches**
 (no `cswp`), so no data-dependent timing at the code level.
 
+## Application: transactional batches with free rollback
+
+`examples/batch_tx.rs` — the pattern behind WAL-less in-memory transactions
+(`#11`) and speculative DSO ticks: the machine stays **purely reversible**,
+the host decides commit/abort from invariants checked *after* applying, and
+abort is just the backward run.
+
+```bash
+cargo run --release --example batch_tx
+```
+
+Scenario: 256 accounts, batches of 16 transfers sized at 60–95% of the
+sender's balance **at batch-build time** — so a sender used twice inside a
+batch causes a cascade overdraft that is invisible until the batch is applied.
+Host validates afterwards and aborts the whole batch.
+
+```text
+пачек OK=12840  откачено=7160 (35.8%)
+leaves: fwd=640000  rev(abort)=229120   (15.5 ns/leaf)
+snapshot-подход скопировал бы 39 MiB — здесь 0
+```
+
+Rollback of a failed batch: **0 log bytes, 0 state copies**, and the final
+state provably equals the commit-only reference simulation (asserted).
+
 ## Honest limits
 
 - Reversible semantics live on bits/integers. IEEE-754 rounding/NaN is not
