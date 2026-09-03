@@ -41,6 +41,7 @@ pub mod cipher;
 pub mod ctl;
 pub mod inst;
 pub mod machine;
+pub mod opt;
 pub mod program;
 pub mod state;
 pub mod synth;
