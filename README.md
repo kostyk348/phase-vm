@@ -239,6 +239,24 @@ AVX2 vs scalar on reversible xor+rotl passes: correctness asserted
 (AVX2 == scalar); on x86 the autovectorizer already closes most of the gap
 (~1.3× hand-AVX2) — wide gain becomes real at SoA multi-register kernels.
 
+
+## The paradigm for typical tasks
+
+Not "where to bolt PHASE into old programs" — what ordinary programming looks
+like in the paradigm (`phase-arch/TYPICAL.md` maps 9 typical task classes →
+phase form → gain):
+
+- **A/B config selection without copies** — `examples/typical_ab.rs`: apply
+  candidate → metric → rollback loser (reverse run, 4 leaves) → commit winner.
+  500k rounds, 0 state copies (classic: 32 MB of clones), 17 ns/leaf.
+- **Parsing with O(1) error recovery** — `examples/typical_parse.rs`: each
+  record parsed into its own Arena mark; semantic failure → `rollback(mark)`.
+  54 515 bad records recovered 2.6 MB with 54 515 O(1) rollbacks instead of
+  327 090 individual frees.
+
+The pattern for all of them: allocate in a phase, transform reversibly,
+**validate at the boundary**, commit or roll back. Failure is a control-flow
+branch — for everyday code too.
 ## Axis B: meet-in-the-middle (`examples/mitm_bfs.rs`)
 
 Bidirectional BFS on 200×200 mazes (~25% walls): bi expands **1.6× fewer**
