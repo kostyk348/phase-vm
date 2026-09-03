@@ -206,6 +206,45 @@ Data-dependent multiply over a 500k-iteration `while` rolls back with a
 single 8-byte decision — the architecture axiom "journal = decisions, never
 state" measured.
 
+
+## P2: AOT — compile kernels to native code (`src/aot.rs`)
+
+Interpreter ~3.7–16 ns/leaf; generated C (`cc -O2 -shared`) + dlopen:
+
+```bash
+cargo run --release --example aot_bench
+# forward : native 0.06 ns/leaf | interpreter 6.08 | 94.8×
+# reverse : native 0.09 ns/leaf | interpreter 8.21 | 94.9×
+```
+
+`phase_fwd`/`phase_rev` mirror the reversible semantics; native == interpreter
+asserted; `rev` requires a purely reversible kernel (boundaries = checkpoint).
+
+## L4: phase capsule in `.eml` (`src/cap.rs`)
+
+State + kernel travel as an RFC-5322 envelope: headers carry the invariants
+(kernel-hash, boundary-hash, state-hash), body carries state + program. The
+receiving host verifies without trusting the sender: state-hash → reverse →
+boundary-hash → re-forward → state-hash.
+
+```bash
+cargo run --release --example capsule
+# капсула: 612 B · верификация OK · финал после миграции == чистый прогон
+```
+
+## P10: wide lanes AVX2 (`examples/wide_bench.rs`)
+
+Reversible primitives (xor/add/rot) are componentwise → vectorizable. Measured
+AVX2 vs scalar on reversible xor+rotl passes: correctness asserted
+(AVX2 == scalar); on x86 the autovectorizer already closes most of the gap
+(~1.3× hand-AVX2) — wide gain becomes real at SoA multi-register kernels.
+
+## Axis B: meet-in-the-middle (`examples/mitm_bfs.rs`)
+
+Bidirectional BFS on 200×200 mazes (~25% walls): bi expands **1.6× fewer**
+vertices than uni (330k vs 535k across 40 mazes); path lengths match
+(asserted). Honest framing: sqrt-style reduction where decomposition exists,
+not a universal 2^N/2 promise.
 ## Application: rollback netcode / server reconciliation
 
 `examples/rollback_netcode.rs` — deterministic authoritative tick where late

@@ -35,6 +35,8 @@
 //! бит-в-бит (см. `tests/roundtrip.rs`).
 
 pub mod alloc;
+pub mod aot;
+pub mod cap;
 pub mod cipher;
 pub mod ctl;
 pub mod inst;
