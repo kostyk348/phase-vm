@@ -158,6 +158,32 @@ every unwinding); determinism is proven by double-run. External disturbances
 enter as boundaries (inputs, not rolled back) — exactly how real control loops
 treat them.
 
+## Application: phase-scoped allocator (`src/alloc.rs`)
+
+What reversibility actually buys an allocator — and what it does not:
+bump-allocation is already a reversible op (`malloc` = pointer advance),
+so **rolling back a whole phase of allocations to a mark is O(1)**, with zero
+per-object headers. Arbitrary-order `free` is *not* reversible without a
+journal, so this is honestly scoped to **phase-shaped workloads** (ticks,
+transactions, ECS) — object lifetimes end at a phase boundary.
+
+```bash
+cargo run --release --example alloc_bench
+```
+
+```text
+K/фазу      malloc+free  arena+rollback  arena+commit  выигрыш×
+8                4.76           1.15           7.93        4.1×
+512             14.03           1.08           7.36       12.9×
+32768           35.27           1.80           7.56       19.6×
+нулевой след отката: OK (offset переиспользован детерминированно)
+```
+
+`rollback(mark)` is a single `truncate` — cost does not grow with K, while
+malloc+free degrades as K grows. Commit-mode phases pay one `reset` (O(1)) at
+the boundary. Zero-trace: after rollback the next allocation deterministically
+reuses the same offset (asserted).
+
 ## Honest limits
 
 - Reversible semantics live on bits/integers. IEEE-754 rounding/NaN is not

@@ -34,6 +34,7 @@
 //! Fuzz: случайное обратимое ядро на случайном состоянии → `F⁻¹(F(S)) == S`
 //! бит-в-бит (см. `tests/roundtrip.rs`).
 
+pub mod alloc;
 pub mod cipher;
 pub mod inst;
 pub mod machine;
