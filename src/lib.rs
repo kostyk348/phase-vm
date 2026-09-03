@@ -43,6 +43,7 @@ pub mod inst;
 pub mod machine;
 pub mod opt;
 pub mod patch;
+pub mod phase_server;
 pub mod program;
 pub mod state;
 pub mod synth;
