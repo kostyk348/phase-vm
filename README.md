@@ -206,6 +206,28 @@ Data-dependent multiply over a 500k-iteration `while` rolls back with a
 single 8-byte decision — the architecture axiom "journal = decisions, never
 state" measured.
 
+## Application: rollback netcode / server reconciliation
+
+`examples/rollback_netcode.rs` — deterministic authoritative tick where late
+client inputs are fixed by **rollback**, never by snapshots. Physics = integer
+symplectic Euler (reversible); inputs are boundaries stored as a 1-byte-per-
+entity-per-tick log. On a late input that differs from the prediction, the
+server reverses to that tick, applies the input, resims deterministically.
+
+```bash
+cargo run --release --example rollback_netcode
+```
+
+```text
+реконсиляций: 142253   окно отката 1..8 тиков (откачено 639715 тиков)
+память: журнал входов 240 000 B  против снапшотов мира 3 840 000 B (16×)
+корректность: hash-цепочка всех 60 001 тиков == эталон (ground truth)
+```
+
+The final timeline provably equals a zero-delay reference run — hash-chain of
+every tick boundary matches. This is the N3/N4 von-Neumann-ailment cure:
+reconciliation without world snapshots, sealed by the SINT hash-chain audit.
+
 ## Honest limits
 
 - Reversible semantics live on bits/integers. IEEE-754 rounding/NaN is not
