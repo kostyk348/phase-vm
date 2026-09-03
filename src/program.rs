@@ -30,7 +30,7 @@ pub struct Program {
     pub nregs: usize,
 }
 
-fn parse_imm(tok: &str) -> Result<u64, String> {
+pub(crate) fn parse_imm(tok: &str) -> Result<u64, String> {
     let t = tok.trim();
     if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         u64::from_str_radix(hex, 16).map_err(|e| format!("imm '{tok}': {e}"))
@@ -44,7 +44,7 @@ fn parse_imm(tok: &str) -> Result<u64, String> {
     }
 }
 
-fn parse_reg(tok: &str, nregs: usize) -> Result<u8, String> {
+pub(crate) fn parse_reg(tok: &str, nregs: usize) -> Result<u8, String> {
     let r = tok
         .strip_prefix('r')
         .or_else(|| tok.strip_prefix('R'))
@@ -113,7 +113,7 @@ pub fn parse(text: &str, nregs: usize) -> Result<Program, String> {
     Ok(Program { nodes: root, nregs })
 }
 
-fn parse_inst(mnem: &str, args: &[&str], nregs: usize) -> Result<Inst, String> {
+pub(crate) fn parse_inst(mnem: &str, args: &[&str], nregs: usize) -> Result<Inst, String> {
     let need = |n: usize| -> Result<(), String> {
         if args.len() != n {
             return Err(format!(

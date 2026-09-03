@@ -184,6 +184,28 @@ malloc+free degrades as K grows. Commit-mode phases pay one `reset` (O(1)) at
 the boundary. Zero-trace: after rollback the next allocation deterministically
 reuses the same offset (asserted).
 
+## L3: decision journal — data-dependent control flow, still reversible
+
+`src/ctl.rs` (`ifnz rN … end`, `wz rN … end`, `rep N … end`): structured
+branching/loops whose *decision log* is **O(decisions), never O(state)** —
+an `if` records one flag, a `while` records one trip count. Reverse trusts the
+journal (LIFO, post-order), `reverse_checked` additionally re-verifies
+conditions. Straight-line leaves stay log-free.
+
+```bash
+cargo run --release --example ctl_demo
+```
+
+```text
+итераций цикла: 500000 (данные! rep статически не смог бы)
+журнал: 1 запись = 8 B      (наивный трейс шагов: 8 000 008 B)
+forward:  3.7 ns/leaf   reverse: 5.7 ns/leaf — состояние == граница, журнал пуст
+```
+
+Data-dependent multiply over a 500k-iteration `while` rolls back with a
+single 8-byte decision — the architecture axiom "journal = decisions, never
+state" measured.
+
 ## Honest limits
 
 - Reversible semantics live on bits/integers. IEEE-754 rounding/NaN is not

@@ -47,6 +47,32 @@ impl State {
     }
 }
 
+impl State {
+    /// FNV-1a 64 над regs+mem — детерминированный снимок состояния.
+    /// (Прививка из SINT: hash-chain «дёшев и окупается» — здесь аудит
+    /// границ фаз и проверка детерминизма resim/rollback.)
+    pub fn hash(&self) -> u64 {
+        let prime = 0x100000001b3u64;
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for &w in &self.regs {
+            h = (h ^ w).wrapping_mul(prime);
+        }
+        for &w in &self.mem {
+            h = (h ^ w).wrapping_mul(prime);
+        }
+        h
+    }
+
+    /// Один шаг hash-цепочки: chain' = FNV(chain xor hash(state)).
+    /// Позволяет построить нестираемый журнал границ фаз (как prev_hash в SINT).
+    pub fn chain_step(prev: u64, state_hash: u64) -> u64 {
+        let prime = 0x100000001b3u64;
+        let mut h = 0xcbf2_9ce4_8422_2325u64 ^ prev;
+        h = (h ^ state_hash).wrapping_mul(prime);
+        h
+    }
+}
+
 impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let items: Vec<String> = self

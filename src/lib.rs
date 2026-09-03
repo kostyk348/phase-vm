@@ -36,6 +36,7 @@
 
 pub mod alloc;
 pub mod cipher;
+pub mod ctl;
 pub mod inst;
 pub mod machine;
 pub mod program;
