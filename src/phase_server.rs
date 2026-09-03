@@ -48,6 +48,32 @@ impl KV {
         KV::default()
     }
 
+    /// SINT-дайджест состояния (аудит).
+    pub fn audit_digest(&self) -> u64 {
+        digest(&self.map)
+    }
+
+    /// Детерминированный снапшот: "k v" по одной на строку, ключи отсортированы.
+    pub fn snapshot(&self) -> String {
+        let mut keys: Vec<&String> = self.map.keys().collect();
+        keys.sort();
+        keys.iter()
+            .map(|k| format!("{} {}", k, self.map[*k]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Загрузить состояние из снапшота (рестарт из капсулы).
+    pub fn from_snapshot(s: &str) -> KV {
+        let mut kv = KV::new();
+        for line in s.lines() {
+            if let Some((k, v)) = line.split_once(' ') {
+                kv.map.insert(k.to_string(), v.to_string());
+            }
+        }
+        kv
+    }
+
     /// Обработать одну строку команды. Возвращает ответ ("" = закрыть).
     pub fn handle(&mut self, line: &str) -> String {
         let t: Vec<&str> = line.split_whitespace().collect();
