@@ -41,8 +41,27 @@ fn unhex_words(s: &str) -> Vec<u64> {
         .collect()
 }
 
-/// Экспорт капсулы в .eml-текст.
+/// Манифест (VCF-стиль): семантические регистры (SINT), порты, роль.
+#[derive(Debug, Clone, Default)]
+pub struct Manifest {
+    pub registers: Vec<&'static str>, // SENSE/FACT/LOGIC/OPINION/CAUSALITY
+    pub ports: Vec<String>,
+    pub role: String,
+}
+
+/// Экспорт капсулы в .eml-текст (+ манифест, если задан).
 pub fn export(tag: &str, kernel_src: &str, state: &State, boundary_hash: u64) -> String {
+    export_with(tag, kernel_src, state, boundary_hash, None)
+}
+
+/// Экспорт с VCF-манифестом (L4: капсула несёт регистры+порты+роль).
+pub fn export_with(
+    tag: &str,
+    kernel_src: &str,
+    state: &State,
+    boundary_hash: u64,
+    mf: Option<&Manifest>,
+) -> String {
     let state_hash = state.hash();
     let kernel_hash = fnv1a(kernel_src);
     let mut out = String::new();
@@ -57,6 +76,22 @@ pub fn export(tag: &str, kernel_src: &str, state: &State, boundary_hash: u64) ->
     out.push_str(&format!("X-Phase-State-Hash: {state_hash:016x}\n"));
     out.push_str(&format!("X-Phase-NRegs: {}\n", state.regs.len()));
     out.push_str(&format!("X-Phase-NMem: {}\n", state.mem.len()));
+    if let Some(m) = mf {
+        out.push_str(&format!(
+            "X-Phase-Vcf: BEGIN:VCARD\nX-Phase-Vcf: VERSION:3.0\nX-Phase-Vcf: ROLE:{}\n",
+            m.role
+        ));
+        if !m.registers.is_empty() {
+            out.push_str(&format!(
+                "X-Phase-Vcf: REGISTERS:{}\n",
+                m.registers.join(",")
+            ));
+        }
+        if !m.ports.is_empty() {
+            out.push_str(&format!("X-Phase-Vcf: PORTS:{}\n", m.ports.join(";")));
+        }
+        out.push_str("X-Phase-Vcf: END:VCARD\n");
+    }
     out.push_str("Content-Type: text/plain; charset=utf-8\n");
     out.push('\n');
     // тело: секции
@@ -144,6 +179,21 @@ mod tests {
         assert_eq!(cap.tag, "t1");
         assert_eq!(cap.boundary_hash, 0x1234);
         assert_eq!(cap.kernel_src, src);
+    }
+
+    #[test]
+    fn manifest_vcf_embedded() {
+        let st = State::random(4, 0, 9);
+        let mf = Manifest {
+            registers: vec!["FACT", "LOGIC"],
+            ports: vec!["in:a".into(), "out:b".into()],
+            role: "r".into(),
+        };
+        let eml = export_with("m", "add r0 r1\n", &st, 0, Some(&mf));
+        assert!(eml.contains("BEGIN:VCARD"));
+        assert!(eml.contains("REGISTERS:FACT,LOGIC"));
+        assert!(eml.contains("PORTS:in:a;out:b"));
+        assert!(eml.contains("END:VCARD"));
     }
 
     #[test]

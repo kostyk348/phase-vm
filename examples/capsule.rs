@@ -36,8 +36,13 @@ fn main() {
     let t0 = Instant::now();
     run_forward(&mut host_a, &a_nodes).unwrap();
 
-    // --- экспорт капсулы (состояние после 7000 итераций) ---
-    let eml = cap::export("migration-demo", &a_src, &host_a, boundary_hash);
+    // --- экспорт капсулы (состояние после 7000 итераций) + VCF-манифест ---
+    let mf = cap::Manifest {
+        registers: vec!["FACT", "LOGIC"],
+        ports: vec!["in:state@tick7000".into(), "out:state@tick10000".into()],
+        role: "migration-demo/phase@7000".into(),
+    };
+    let eml = cap::export_with("migration-demo", &a_src, &host_a, boundary_hash, Some(&mf));
 
     // --- Хост B: импорт + верификация без доверия ---
     let cap_msg = cap::import(&eml).expect("капсула повреждена");

@@ -43,6 +43,7 @@ pub mod inst;
 pub mod machine;
 pub mod program;
 pub mod state;
+pub mod synth;
 
 pub use inst::Inst;
 pub use machine::{count_leaves, reverse_n, run_forward};
