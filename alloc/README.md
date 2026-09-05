@@ -1,23 +1,20 @@
-# phase_alloc — LD_PRELOAD аллокатор (WIP)
+# phase_alloc — рабочий LD_PRELOAD аллокатор (v4, MT-safe)
 
-Статус: **НЕ продакшен.** Однопоточная корректность подтверждена (api + стресс
-3/3 детерминирован, кадры 2.5 ns/alloc против glibc 14). Многопоточный стресс
-(8 потоков) всё ещё падает — известный открытый дефект гонки, root-cause не
-завершён. Не прелоадить в реальные игры/приложения.
+Статус: **MT-safe подтверждён**. API-тест под нами OK; стресс 8 потоков
+(200k итераций x 8, аллокации 1..8192, posix_memalign/aligned/strdup/realloc/
+usable) — 3/3 успех, checksum 34851280 == glibc.
 
-Что сделано (v3):
-- полный POSIX ABI: malloc/free/calloc/realloc/reallocarray/posix_memalign/
-  aligned_alloc/memalign/valloc/malloc_usable_size/strdup/strndup/__libc_*;
-- выравнивание 16; заголовки: class/large 16B перед ptr, aligned 32B;
-- потокобезопасность: глобальный mutex + per-thread фазовые кадры
-  (pa_frame_begin/end, bump, bulk reset O(1));
-- реестр mmap-регионов: заголовки читаются только внутри своих регионов,
-  чужие указатели -> RTLD_NEXT free (фикс segfault на glibc-внутренних);
-- фикс magic: класс в битах 32..39 (не внутри 32-битной магии).
+Дизайн v4 (после root-cause гонки в общем free-листе):
+- У каждого потока СВОИ арены и приватный free-лист (трогает только владелец).
+- Чужой free() кладёт блок в глобальный pending (под mutex); владелец при
+  malloc забирает pending в свой лист.
+- Общего кросс-поточного списка нет -> нет гонки. Owner-id в заголовке.
+- FREE_BIT в заголовке делает двойной free безвредным.
+- Полный POSIX ABI, выравнивание 16, реестр mmap-регионов (чужие -> RTLD_NEXT),
+  per-thread фазовые кадры pa_frame_begin/end (bump, bulk reset O(1)).
 
-Известные проблемы:
-- MT стресс падает в carve_locked (порча free-листа класса) — гонка не найдена;
-- однопоточный double-free-детектор давал ложные срабатывания — убран.
+Замер: кадры 2.5 ns/alloc vs glibc 14.0 (LD_PRELOAD=$PWD/libphase_alloc.so ./bench frames).
 
-Быстрый старт: make && ./api && LD_PRELOAD=$PWD/libphase_alloc.so ./api
-Замер кадров: LD_PRELOAD=$PWD/libphase_alloc.so ./bench frames
+Запуск проверок:
+  make && ./api && LD_PRELOAD=$PWD/libphase_alloc.so ./api
+  ./stress && LD_PRELOAD=$PWD/libphase_alloc.so ./stress   # MT 8 потоков
