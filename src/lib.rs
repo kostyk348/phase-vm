@@ -47,6 +47,7 @@ pub mod phase_server;
 pub mod program;
 pub mod state;
 pub mod synth;
+pub mod uring;
 
 pub use inst::Inst;
 pub use machine::{count_leaves, reverse_n, run_forward};
