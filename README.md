@@ -257,6 +257,15 @@ phase form → gain):
 The pattern for all of them: allocate in a phase, transform reversibly,
 **validate at the boundary**, commit or roll back. Failure is a control-flow
 branch — for everyday code too.
+## Phase math: reversible functions with analytic inverses
+
+`src/pmath.rs` + `examples/math_demo.rs` — ordinary math rewritten for the
+paradigm: inside a phase, math = bijections on Z/2^64 whose inverse is
+*computed*, not stored: `MulOdd(m)` (odd multiplier — a bijection; inverse via
+Newton mod-inverse), `Add`, `Xor`, `RotL`, ARX rounds. Compositions are
+bijections, so any formula is undoable exactly (asserted on random round-trips).
+Float math stays at the boundary (it is not invertible).
+
 ## Axis B: meet-in-the-middle (`examples/mitm_bfs.rs`)
 
 Bidirectional BFS on 200×200 mazes (~25% walls): bi expands **1.6× fewer**
