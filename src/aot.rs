@@ -37,6 +37,7 @@ fn gen_leaf(i: &Inst, tmpc: &mut u32) -> String {
         RotL(x, k) => format!("r[{x}]=ROL(r[{x}],{});", k & 63),
         RotR(_x, k) if (k & 63) == 0 => String::new(),
         RotR(x, k) => format!("r[{x}]=ROR(r[{x}],{});", k & 63),
+        MulC(x, m) => format!("r[{x}]*={m}ULL;"),
         Toff(c1, c2, x) => format!("r[{x}]^=r[{c1}]&r[{c2}];"),
         CSwap(c, a, b) => {
             let n = tmp(tmpc);

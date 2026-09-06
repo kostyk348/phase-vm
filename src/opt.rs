@@ -27,6 +27,7 @@ fn cancel_pair(a: Inst, b: Inst) -> bool {
         (Not(r1), Not(r2)) => r1 == r2,
         (Inc(r1), Dec(r2)) | (Dec(r1), Inc(r2)) => r1 == r2,
         (MAdd(a1, v1), MSub(a2, v2)) | (MSub(a1, v1), MAdd(a2, v2)) => a1 == a2 && v1 == v2,
+        (MulC(r1, m1), MulC(r2, m2)) => r1 == r2 && m1.wrapping_mul(m2) == 1,
         (MXor(a1, v1), MXor(a2, v2)) => a1 == a2 && v1 == v2,
         _ => false,
     }

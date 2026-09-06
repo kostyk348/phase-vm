@@ -164,6 +164,10 @@ pub(crate) fn parse_inst(mnem: &str, args: &[&str], nregs: usize) -> Result<Inst
             need(2)?;
             RotL(r(0)?, imm(1)? as u32)
         }
+        "mulc" => {
+            need(2)?;
+            MulC(r(0)?, imm(1)?)
+        }
         "rotr" => {
             need(2)?;
             RotR(r(0)?, imm(1)? as u32)

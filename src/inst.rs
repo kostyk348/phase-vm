@@ -32,6 +32,8 @@ pub enum Inst {
     RotL(u8, u32),
     /// `r = rotr(r, k)` — обратная RotL(r, k).
     RotR(u8, u32),
+    /// `r = r * m` (m НЕЧЁТНОЕ, wrap) — биекция на u64; инверсия = MulC(r, m⁻¹).
+    MulC(u8, u64),
     /// `t ^= c1 & c2` (поразрядно) — самобратная. t не должен алиасить c1/c2.
     Toff(u8, u8, u8),
     /// Если бит0(c): swap(a,b). Самобратная. c не должен алиасить a/b.
@@ -69,6 +71,7 @@ impl Inst {
             Swap(a, b) => Swap(a, b),
             RotL(r, k) => RotR(r, k),
             RotR(r, k) => RotL(r, k),
+            MulC(r, m) => MulC(r, crate::pmath::mod_inv_odd(m)),
             Toff(a, b, t) => Toff(a, b, t),
             CSwap(c, a, b) => CSwap(c, a, b),
             MAdd(a, v) => MSub(a, v),
@@ -98,6 +101,7 @@ impl Inst {
                 Some("index == value: mem[..] ^= mem[..]-индекс сам себя портит")
             }
             RAdd(r, a) | RSub(r, a) if r == a => Some("reg == index: небиективно"),
+            MulC(_, m) if m & 1 == 0 => Some("mulc: константа чётная — не биекция"),
             _ => None,
         }
     }
@@ -166,6 +170,10 @@ impl Inst {
                 let i = at(r)?;
                 state.regs[i] = state.regs[i].rotate_right(k & 63);
             }
+            MulC(r, m) => {
+                let i = at(r)?;
+                state.regs[i] = state.regs[i].wrapping_mul(m);
+            }
             Toff(c1, c2, t) => {
                 let i = at(c1)?;
                 let j = at(c2)?;
@@ -231,6 +239,7 @@ impl Inst {
             Swap(..) => "swp",
             RotL(..) => "rotl",
             RotR(..) => "rotr",
+            MulC(..) => "mulc",
             Toff(..) => "toff",
             CSwap(..) => "cswp",
             Set(..) => "set",
@@ -258,6 +267,7 @@ impl fmt::Display for Inst {
             Swap(a, b) => write!(f, "swp r{} r{}", a, b),
             RotL(r, k) => write!(f, "rotl r{} {}", r, k),
             RotR(r, k) => write!(f, "rotr r{} {}", r, k),
+            MulC(r, m) => write!(f, "mulc r{} {:#x}", r, m),
             Toff(a, b, t) => write!(f, "toff r{} r{} r{}", a, b, t),
             CSwap(c, a, b) => write!(f, "cswp r{} r{} r{}", c, a, b),
             Set(r, imm) => write!(f, "set r{} {:#x}", r, imm),

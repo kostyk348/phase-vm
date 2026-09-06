@@ -49,7 +49,7 @@ fn compile(ops: &[Op]) -> (String, Vec<u64>) {
                 let reg = keys.len();
                 body.push_str(&format!("xor r0 r{reg}\n"));
             }
-            Op::MulOdd(_) => panic!("MulOdd не выражается в ISA (нет mul)"),
+            Op::MulOdd(m) => body.push_str(&format!("mulc r0 {:#x}\n", m)),
         }
     }
     let mut text = String::new();
@@ -68,10 +68,11 @@ fn main() {
         let n = 4 + (rng.next() % 7) as usize;
         let mut ops = Vec::with_capacity(n);
         for _ in 0..n {
-            ops.push(match rng.next() % 3 {
+            ops.push(match rng.next() % 4 {
                 0 => Op::RotL((rng.next() % 63) as u32 + 1),
                 1 => Op::Add(rng.next()),
-                _ => Op::Xor(rng.next()),
+                2 => Op::Xor(rng.next()),
+                _ => Op::MulOdd(rng.next() | 1), // нечётное
             });
         }
         let (text, keys) = compile(&ops);
@@ -104,7 +105,7 @@ fn main() {
     }
     let dt = t0.elapsed();
 
-    println!("формула→kernel: {ok} случайных формул (rotl/add/xor, 4..10 звеньев)");
+    println!("формула→kernel: {ok} случайных формул (rotl/add/xor/mulc, 4..10 звеньев)");
     println!("VM.forward == math.apply; VM.reverse == x == math.inverse (assert)");
     println!("инверсия машины БЕЗ логов == аналитическая инверсия математики");
     println!(

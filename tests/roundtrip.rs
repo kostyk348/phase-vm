@@ -177,6 +177,34 @@ fn pure_mem_kernel_roundtrip_from_random() {
 }
 
 #[test]
+fn mulc_roundtrip_odd_constants() {
+    // MulC(r, m) с нечётным m — биекция; F⁻¹ = MulC(r, inv(m))
+    for m in [3u64, 7, 0x9E37_79B9_7F4A_7C15, u64::MAX] {
+        let nodes = phase_vm::program::parse(&format!("mulc r0 {m:#x}\n"), 4)
+            .unwrap()
+            .nodes;
+        for seed in 1..50u64 {
+            let orig = State::random(4, 0, seed);
+            let mut s = orig.clone();
+            run_forward(&mut s, &nodes).unwrap();
+            let done = reverse_all(&mut s, &nodes).unwrap();
+            assert_eq!(done, 1);
+            assert_eq!(s, orig, "m={m:#x} seed={seed}");
+        }
+    }
+}
+
+#[test]
+fn mulc_even_rejected_by_checker() {
+    let nodes = phase_vm::program::parse("mulc r0 4\n", 4).unwrap().nodes;
+    let rep = phase_vm::check::check(&nodes);
+    assert!(
+        !rep.reversible(),
+        "чётная константа не должна быть обратимой"
+    );
+}
+
+#[test]
 fn mset_is_boundary() {
     // mset в ядре = граница: суффикс после неё откатывается, сама — нет.
     let nodes = phase_vm::program::parse("mset 3 42\nmadd r0 r1\n", 4)
