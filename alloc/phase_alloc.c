@@ -42,6 +42,13 @@ static void reg_add(void* b, size_t l){ if(nreg<REGMAX){ regs[nreg].base=b; regs
 static void reg_del(void* b){ for(int i=0;i<nreg;i++) if(regs[i].base==b){ regs[i]=regs[nreg-1]; nreg--; return; } }
 static int reg_find(void* p){ uintptr_t x=(uintptr_t)p; for(int i=0;i<nreg;i++){ uintptr_t b=(uintptr_t)regs[i].base; if(x>=b && x<b+regs[i].len) return i; } return -1; }
 
+/* pop из free-листа: снять FREE_BIT в заголовке (иначе повторный free потеряет блок) */
+static void* pop_class(void** head){
+    void* p=*head;
+    if(p){ *head=*(void**)p; *((uint64_t*)((char*)p-16)) &= ~FREE_BIT; }
+    return p;
+}
+
 static inline int my_id(void){ if(t_id<0){ pthread_mutex_lock(&g_lock); if(t_id<0) t_id=g_next_id++; pthread_mutex_unlock(&g_lock);} return t_id; }
 
 /* приватный bump: mmap региона если нужно (под g_lock), выдать блок */
@@ -93,12 +100,12 @@ static void* phase_malloc(size_t n){
     if(c>=0){
         Arena* a=&t_a[c];
         /* private лист */
-        if(a->free_head){ void* p=a->free_head; a->free_head=*(void**)p; return p; }
+        if(a->free_head){ void* p=pop_class(&a->free_head); return p; }
         /* забрать чужие pending */
         pthread_mutex_lock(&g_lock);
         if(g_pending[c].free_head){ a->free_head=g_pending[c].free_head; g_pending[c].free_head=NULL; }
         pthread_mutex_unlock(&g_lock);
-        if(a->free_head){ void* p=a->free_head; a->free_head=*(void**)p; return p; }
+        if(a->free_head){ void* p=pop_class(&a->free_head); return p; }
         void* p=bump(a,CLASS_SZ[c]+16);
         if(!p) return NULL;
         ((uint64_t*)p)[0]=CLASS_MAGIC|((uint64_t)c<<32);
