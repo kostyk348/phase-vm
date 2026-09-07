@@ -42,6 +42,15 @@ static int nreg = 0;
 
 static int class_of(size_t n){ for(size_t i=0;i<NCLASS;i++) if(n<=CLASS_SZ[i]) return (int)i; return -1; }
 
+/* per-thread регионы (bump-арены этого потока) — проверка владения БЕЗ лока */
+static __thread struct { void* base; size_t len; } treg[128];
+static __thread int ntre = 0;
+static int in_own(void* p){
+    char* q=(char*)p;
+    for(int i=0;i<ntre;i++){ char* b=(char*)treg[i].base; if(q>=b && q<b+treg[i].len) return 1; }
+    return 0;
+}
+
 static void reg_add(void* b, size_t l){ if(nreg<REGMAX){ regs[nreg].base=b; regs[nreg].len=l; nreg++; } }
 static void reg_del(void* b){ for(int i=0;i<nreg;i++) if(regs[i].base==b){ regs[i]=regs[nreg-1]; nreg--; return; } }
 static int reg_find(void* p){ uintptr_t x=(uintptr_t)p; for(int i=0;i<nreg;i++){ uintptr_t b=(uintptr_t)regs[i].base; if(x>=b && x<b+regs[i].len) return i; } return -1; }
@@ -131,7 +140,20 @@ static int real_free_tried=0;
 
 static void phase_free(void* p){
     if(!p) return;
-    if(fr_depth>0 && (char*)p>=(char*)fr_base && (char*)p<(char*)fr_base+fr_used) return;
+    if(fr_depth>0 && (char*)p>=(char*)fr_base && (char*)p<(char*)fr_base+fr_used) return; /* кадр */
+    int me=my_id();
+    /* БЫСТРЫЙ путь: блок из региона ЭТОГО потока — без глобального лока */
+    if(in_own(p)){
+        uint64_t h=*(uint64_t*)((char*)p-16);
+        if((h&0xffffffffu)==CLASS_MAGIC && !(h&LARGE_BIT) && !(h&FREE_BIT)){
+            int c=(int)((h>>32)&0xff);
+            *((uint64_t*)((char*)p-16))=CLASS_MAGIC|((uint64_t)c<<32)|FREE_BIT;
+            if(c>=0&&c<(int)NCLS){ *(void**)p=ta[c].free_head; ta[c].free_head=p; }
+            return;
+        }
+        /* large/aligned в class-регионе быть не может — падаем в slow */
+    }
+    /* МЕДЛЕННЫЙ путь: чужой/большой/выровненный — под глобальным локом */
     glock();
     if(reg_find(p)<0){
         gunlock();
@@ -143,29 +165,18 @@ static void phase_free(void* p){
     if((h&0xffffffffu)==CLASS_MAGIC){
         if(h&LARGE_BIT){ void* base=(char*)p-16; size_t tot=(size_t)*(uint64_t*)((char*)p-8);
             reg_del(base); gunlock(); munmap(base,tot); return; }
-        int c=(int)((h>>32)&0xff);
-        uint32_t owner=(uint32_t)*(uint64_t*)((char*)p-8);
-        if(c>=0&&c<(int)NCLASS){
-            if(!(h&FREE_BIT)){
-                *(uint64_t*)((char*)p-16)=CLASS_MAGIC|((uint64_t)c<<32)|FREE_BIT;
-                if(owner==(uint32_t)my_id()){
-                    /* свой блок: кладём в свой лист (мы держим g_lock — ок) */
-                    Arena* a=&t_a[c];
-                    /* чужой мог положить сюда pending? нет: pending отдельный */
-                    *(void**)p=a->free_head; a->free_head=p;
-                } else {
-                    *(void**)p=g_pending[c].free_head; g_pending[c].free_head=p;
-                }
-            }
+        int c=(int)((h>>32)&0xff); uint32_t own=(uint32_t)*(uint64_t*)((char*)p-8);
+        if(c>=0&&c<(int)NCLS&&!(h&FREE_BIT)){
+            *((uint64_t*)((char*)p-16))=CLASS_MAGIC|((uint64_t)c<<32)|FREE_BIT;
+            if(own==(uint32_t)me){ *(void**)p=ta[c].free_head; ta[c].free_head=p; }
+            else { *(void**)p=pend[c].free_head; pend[c].free_head=p; }
         }
-        gunlock();
-        return;
+        gunlock(); return;
     }
     uint64_t am=*(uint64_t*)((char*)p-32);
-    if((am&0xffffffffu)==ALIGN_MAGIC){
-        void* orig=(void*)*(uint64_t*)((char*)p-24);
-        size_t tot=(size_t)*(uint64_t*)((char*)p-16);
-        reg_del(orig); gunlock(); munmap(orig,tot); return;
+    if((am&0xffffffffu)==AL_MAGIC){
+        void* o=(void*)*(uint64_t*)((char*)p-24); size_t tot=(size_t)*(uint64_t*)((char*)p-16);
+        reg_del(o); gunlock(); munmap(o,tot); return;
     }
     gunlock();
 }
@@ -173,15 +184,17 @@ static void phase_free(void* p){
 static size_t phase_usable(void* p){
     if(!p) return 0;
     if(fr_depth>0&&(char*)p>=(char*)fr_base&&(char*)p<(char*)fr_base+fr_used) return fr_used-((char*)p-(char*)fr_base);
-    size_t r=0;
-    glock();
-    if(reg_find(p)>=0){
+    if(in_own(p)){
         uint64_t h=*(uint64_t*)((char*)p-16);
-        if((h&0xffffffffu)==CLASS_MAGIC){
-            if(h&LARGE_BIT) r=(size_t)*(uint64_t*)((char*)p-8)-16;
-            else { int c=(int)((h>>32)&0xff); r=(c>=0&&c<(int)NCLASS)? CLASS_SZ[c]:0; }
+        if((h&0xffffffffu)==CLASS_MAGIC && !(h&LARGE_BIT)){
+            int c=(int)((h>>32)&0xff);
+            return c>=0&&c<(int)NCLS? CLASS_SZ[c]:0;
         }
     }
+    size_t r=0; glock();
+    if(reg_find(p)>=0){ uint64_t h=*(uint64_t*)((char*)p-16);
+        if((h&0xffffffffu)==CLASS_MAGIC){ if(h&LARGE_BIT) r=(size_t)*(uint64_t*)((char*)p-8)-16;
+            else { int c=(int)((h>>32)&0xff); r=(c>=0&&c<(int)NCLS)?CLASS_SZ[c]:0; } } }
     gunlock();
     return r;
 }
