@@ -29,7 +29,11 @@ static Arena g_pending[NCLASS];   /* чужие освобождения (под
 static __thread Arena t_a[NCLASS];/* приватные арены потока */
 static __thread int t_id = -1;
 static int g_next_id = 1;
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_lock;
+static volatile void* lowner=0;
+
+static void glock(void){ int r=glock(); if(r==EOWNERDEAD) pthread_mutex_consistent(&g_lock); }
+static void gunlock(void){ gunlock(); }
 
 #define REGMAX 65536
 typedef struct { void* base; size_t len; } Reg;
@@ -49,18 +53,18 @@ static void* pop_class(void** head){
     return p;
 }
 
-static inline int my_id(void){ if(t_id<0){ pthread_mutex_lock(&g_lock); if(t_id<0) t_id=g_next_id++; pthread_mutex_unlock(&g_lock);} return t_id; }
+static inline int my_id(void){ if(t_id<0){ glock(); if(t_id<0) t_id=g_next_id++; gunlock();} return t_id; }
 
 /* приватный bump: mmap региона если нужно (под g_lock), выдать блок */
 static void* bump(Arena* a, size_t n){
     if(a->off+n>a->cap){
-        pthread_mutex_lock(&g_lock);
+        glock();
         if(a->off+n>a->cap){
             size_t cap=1u<<20;
             void* m=mmap(NULL,cap,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
             if(m!=MAP_FAILED){ a->base=m; a->cap=cap; a->off=0; reg_add(m,cap); }
         }
-        pthread_mutex_unlock(&g_lock);
+        gunlock();
         if(a->off+n>a->cap) return NULL;
     }
     void* p=(char*)a->base+a->off; a->off+=n; return p;
@@ -102,9 +106,9 @@ static void* phase_malloc(size_t n){
         /* private лист */
         if(a->free_head){ void* p=pop_class(&a->free_head); return p; }
         /* забрать чужие pending */
-        pthread_mutex_lock(&g_lock);
+        glock();
         if(g_pending[c].free_head){ a->free_head=g_pending[c].free_head; g_pending[c].free_head=NULL; }
-        pthread_mutex_unlock(&g_lock);
+        gunlock();
         if(a->free_head){ void* p=pop_class(&a->free_head); return p; }
         void* p=bump(a,CLASS_SZ[c]+16);
         if(!p) return NULL;
@@ -114,10 +118,10 @@ static void* phase_malloc(size_t n){
     }
     /* крупный */
     size_t tot=n+16;
-    pthread_mutex_lock(&g_lock);
+    glock();
     void* m=mmap(NULL,tot,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     if(m!=MAP_FAILED){ ((uint64_t*)m)[0]=CLASS_MAGIC|LARGE_BIT; ((uint64_t*)m)[1]=tot; reg_add(m,tot); }
-    pthread_mutex_unlock(&g_lock);
+    gunlock();
     if(m==MAP_FAILED) return NULL;
     return (char*)m+16;
 }
@@ -128,9 +132,9 @@ static int real_free_tried=0;
 static void phase_free(void* p){
     if(!p) return;
     if(fr_depth>0 && (char*)p>=(char*)fr_base && (char*)p<(char*)fr_base+fr_used) return;
-    pthread_mutex_lock(&g_lock);
+    glock();
     if(reg_find(p)<0){
-        pthread_mutex_unlock(&g_lock);
+        gunlock();
         if(!real_free_tried){ real_free_tried=1; real_free=(void(*)(void*))dlsym(RTLD_NEXT,"free"); }
         if(real_free) real_free(p);
         return;
@@ -138,7 +142,7 @@ static void phase_free(void* p){
     uint64_t h=*(uint64_t*)((char*)p-16);
     if((h&0xffffffffu)==CLASS_MAGIC){
         if(h&LARGE_BIT){ void* base=(char*)p-16; size_t tot=(size_t)*(uint64_t*)((char*)p-8);
-            reg_del(base); pthread_mutex_unlock(&g_lock); munmap(base,tot); return; }
+            reg_del(base); gunlock(); munmap(base,tot); return; }
         int c=(int)((h>>32)&0xff);
         uint32_t owner=(uint32_t)*(uint64_t*)((char*)p-8);
         if(c>=0&&c<(int)NCLASS){
@@ -154,23 +158,23 @@ static void phase_free(void* p){
                 }
             }
         }
-        pthread_mutex_unlock(&g_lock);
+        gunlock();
         return;
     }
     uint64_t am=*(uint64_t*)((char*)p-32);
     if((am&0xffffffffu)==ALIGN_MAGIC){
         void* orig=(void*)*(uint64_t*)((char*)p-24);
         size_t tot=(size_t)*(uint64_t*)((char*)p-16);
-        reg_del(orig); pthread_mutex_unlock(&g_lock); munmap(orig,tot); return;
+        reg_del(orig); gunlock(); munmap(orig,tot); return;
     }
-    pthread_mutex_unlock(&g_lock);
+    gunlock();
 }
 
 static size_t phase_usable(void* p){
     if(!p) return 0;
     if(fr_depth>0&&(char*)p>=(char*)fr_base&&(char*)p<(char*)fr_base+fr_used) return fr_used-((char*)p-(char*)fr_base);
     size_t r=0;
-    pthread_mutex_lock(&g_lock);
+    glock();
     if(reg_find(p)>=0){
         uint64_t h=*(uint64_t*)((char*)p-16);
         if((h&0xffffffffu)==CLASS_MAGIC){
@@ -178,7 +182,7 @@ static size_t phase_usable(void* p){
             else { int c=(int)((h>>32)&0xff); r=(c>=0&&c<(int)NCLASS)? CLASS_SZ[c]:0; }
         }
     }
-    pthread_mutex_unlock(&g_lock);
+    gunlock();
     return r;
 }
 
@@ -187,16 +191,16 @@ static void* aligned_impl(size_t align,size_t size){
     if(align<16) align=16;
     if(align&(align-1)) return NULL;
     size_t tot=size+align+64;
-    pthread_mutex_lock(&g_lock);
+    glock();
     void* m=mmap(NULL,tot,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
-    if(m==MAP_FAILED){ pthread_mutex_unlock(&g_lock); return NULL; }
+    if(m==MAP_FAILED){ gunlock(); return NULL; }
     uintptr_t a=(((uintptr_t)m)+32+align-1)&~(uintptr_t)(align-1);
     void* p=(void*)a;
     ((uint64_t*)p)[-4]=ALIGN_MAGIC;
     ((uint64_t*)p)[-3]=(uint64_t)m;
     ((uint64_t*)p)[-2]=(uint64_t)tot;
     reg_add(m,tot);
-    pthread_mutex_unlock(&g_lock);
+    gunlock();
     return p;
 }
 
@@ -226,6 +230,14 @@ void* valloc(size_t size){ return aligned_impl(4096,size); }
 size_t malloc_usable_size(void* p){ return phase_usable(p); }
 char* strdup(const char* s){ size_t n=strlen(s)+1; char* p=malloc(n); if(p) memcpy(p,s,n); return p; }
 char* strndup(const char* s,size_t m){ size_t n=0; while(n<m&&s[n]) n++; char* p=malloc(n+1); if(p){ memcpy(p,s,n); p[n]=0; } return p; }
+/* --- fork-safe: пересоздать mutex в ребёнке --- */
+static void fork_child(void){ pthread_mutex_init(&g_lock,NULL); }
+__attribute__((constructor)) static void atfork_init(void){ pthread_mutexattr_t a; pthread_mutexattr_init(&a); pthread_mutexattr_setrobust(&a,PTHREAD_MUTEX_ROBUST); pthread_mutex_init(&g_lock,&a); pthread_atfork(NULL,NULL,fork_child); }
+static void cfree_impl(void* p){ phase_free(p); }
+void cfree(void* p){ phase_free(p); }
+void* __libc_memalign(size_t a,size_t n){ return aligned_impl(a,n); }
+void* __libc_valloc(size_t n){ return aligned_impl(4096,n); }
+
 void* __libc_malloc(size_t n){ return phase_malloc(n); }
 void __libc_free(void* p){ phase_free(p); }
 void* __libc_calloc(size_t n,size_t s){ return calloc(n,s); }
