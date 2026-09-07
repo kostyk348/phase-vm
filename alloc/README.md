@@ -1,15 +1,17 @@
 # phase_alloc — рабочий LD_PRELOAD аллокатор (v4, MT-safe)
 
-Статус: **работает на нашем синтетическом MT-стрессе и soak; НЕ готов для
-произвольных больших приложений**. Открытый дефект: CPython 3.14 MT (2+ потоков) под LD_PRELOAD виснет.
+Статус: **v5 чистый — работает на реальных рантаймах** (CPython 3.14 MT,
+C++ std::thread, git, + наш MT-стресс/soak/cross-free). Прежние «python-висы»
+были артефактом повреждённого файла (наслоение правок: glock сам себя
+вызывал), а не дизайна. hot-path без глобального лока. Открытый дефект: CPython 3.14 MT (2+ потоков) под LD_PRELOAD виснет.
 СТАТУС v5: hot-path БЕЗ глобального лока (per-thread регионы in_own + быстрый
 free/usable своих блоков; глобальный lock только для чужих/больших/новых
 регионов). Проверено: api, MT-стресс 8x200k, soak 8x1M, cross-free C, и
 РЕАЛЬНЫЙ C++ std::thread 6 потоков (vector/string churn) — всё зелёное.
-ОСТАЛСЯ открытый дефект: CPython 3.14 MT (2+ потоков) виснет — аномалия
-именно python3.14 (другие реальные рантаймы работают); root-cause не
-завершён. Прелоад в произвольные/Steam-приложения — только после закрытия
-этого кейса; рабочий путь для своих движков: galloc API или frame-режим.
+Диагностика env: GALLOC_DIAG=1 (лог foreign-free), GALLOC_LEAK_FOREIGN=1
+(чужие free не форвардить — для движков со своим аллокатором).
+Для Steam: launch options LD_PRELOAD=$PWD/libphase_alloc.so %command%
+(только native-Linux).
 Проверено:
 - MT стресс 8 потоков (200k x 8) 3/3, checksum == glibc;
 - SOAK 8 потоков x 1M: exit=0, checksum 174278880 == glibc, peak RSS **2 544 kB против glibc 5 664 kB**;
