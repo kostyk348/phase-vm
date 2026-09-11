@@ -27,6 +27,7 @@
 static const size_t CLASS_SZ[] = {16,32,48,64,96,128,192,256,384,512,768,1024,1536,2048,3072,4096,
     6144,8192,12288,16384,24576,32768,49152,65536,98304,131072,196608,262144,393216,524288,786432,1048576};
 #define NCLASS (sizeof(CLASS_SZ)/sizeof(CLASS_SZ[0]))
+static size_t g_region = (1u<<20); /* мин. размер региона; GALLOC_REGION_MB */
 
 typedef struct { void* base; size_t cap, off; void* free_head; } Arena;
 static Arena g_pending[NCLASS];               /* чужие (под lock) */
@@ -192,7 +193,6 @@ static void* (*real_dlopen)(const char*,int) = NULL;
 static int real_free_tried = 0;
 static int g_passthrough = -1;
 static int g_prof = 0;
-static size_t g_region = (1u<<20); /* мин. размер региона, GALLOC_REGION_MB */
 static unsigned long long P_mc,P_fc,P_uc,P_rc,P_mcy,P_fcy,P_ucy,P_rcy;
 static inline unsigned long long rdtsc_(void){ unsigned a,d; __asm__ __volatile__("rdtsc":"=a"(a),"=d"(d)); return ((unsigned long long)d<<32)|a; }
 static void prof_report(void);
