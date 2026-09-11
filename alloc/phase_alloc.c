@@ -12,6 +12,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#include <time.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <dlfcn.h>
@@ -36,8 +37,19 @@ static __thread int holding = 0;
 
 static void glock(void){
     if(holding){ fprintf(stderr,"[galloc] SELF-RELOCK ra=%p\n",__builtin_return_address(0)); abort(); }
-    int r = pthread_mutex_lock(&g_lock);
-    if(r == EOWNERDEAD) pthread_mutex_consistent(&g_lock);
+    const char* w = getenv("GALLOC_LOCKWARN_MS");
+    if(w){
+        long ms = atol(w);
+        struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts);
+        ts.tv_sec += ms/1000; ts.tv_nsec += (ms%1000)*1000000L;
+        if(ts.tv_nsec >= 1000000000L){ ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        int r = pthread_mutex_timedlock(&g_lock,&ts);
+        if(r == ETIMEDOUT){ fprintf(stderr,"[galloc] LOCK WAIT >%ldms ra=%p\n", ms, __builtin_return_address(0)); pthread_mutex_lock(&g_lock); }
+        else if(r == EOWNERDEAD) pthread_mutex_consistent(&g_lock);
+    } else {
+        int r = pthread_mutex_lock(&g_lock);
+        if(r == EOWNERDEAD) pthread_mutex_consistent(&g_lock);
+    }
     holding = 1; lowner = (void*)pthread_self();
 }
 static void gunlock(void){ holding = 0; lowner = 0; pthread_mutex_unlock(&g_lock); }
