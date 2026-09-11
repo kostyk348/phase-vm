@@ -163,7 +163,8 @@ static void phase_free(void* p){
         if(!leak && getenv("GALLOC_LEAK_FOREIGN")) leak=1;
         if(diag && (fn%2000)==0) fprintf(stderr,"[galloc] foreign-free n=%llu p=%p\n", fn, p);
         if(leak) return; /* чужой аллокатор движка: не форвардим */
-        if(!real_free_tried){ real_free_tried=1; real_free=(void(*)(void*))dlsym(RTLD_NEXT,"free"); }
+        /* real_free уже резолвнут в конструкторе: НЕ вызываем dlsym в hot-path
+           (dlopen loader-lock reentrancy -> дедлок на загрузке ассетов) */
         if(real_free) real_free(p);
         return;
     }
@@ -261,6 +262,9 @@ void* __libc_valloc(size_t n){ return aligned_impl(4096,n); }
 
 static void fork_child(void){ pthread_mutex_init(&g_lock, NULL); holding=0; lowner=NULL; }
 __attribute__((constructor)) static void atfork_init(void){
+    if(getenv("GALLOC_VERBOSE")) fprintf(stderr,"[galloc] loaded pid=%d\n",(int)getpid());
+    /* резолвим настоящий free заранее — чтобы free() никогда не звал dlsym */
+    if(!real_free_tried){ real_free_tried=1; real_free=(void(*)(void*))dlsym(RTLD_NEXT,"free"); }
     pthread_mutexattr_t a; pthread_mutexattr_init(&a);
     pthread_mutexattr_setrobust(&a, PTHREAD_MUTEX_ROBUST);
     pthread_mutex_init(&g_lock, &a);
