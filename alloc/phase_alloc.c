@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
+#include <signal.h>
 
 #define CLASS_MAGIC 0xFA5E0001u
 #define ALIGN_MAGIC 0xFA5E0002u
@@ -63,16 +64,42 @@ static int nreg = 0;
 /* per-thread bump-регионы — проверка владения БЕЗ лока */
 static __thread struct { void* base; size_t len; } treg[128];
 static __thread int ntre = 0;
+static void treg_add(void* b, size_t l){
+    if(ntre>=128) return;
+    uintptr_t key=(uintptr_t)b; int i=ntre;
+    while(i>0 && (uintptr_t)treg[i-1].base > key){ treg[i]=treg[i-1]; i--; }
+    treg[i].base=b; treg[i].len=l; ntre++;
+}
 static int in_own(void* p){
-    char* q = (char*)p;
-    for(int i=0;i<ntre;i++){ char* b=(char*)treg[i].base; if(q>=b && q<b+treg[i].len) return 1; }
+    uintptr_t x=(uintptr_t)p; int lo=0, hi=ntre-1;
+    while(lo<=hi){ int m=(lo+hi)>>1; uintptr_t b=(uintptr_t)treg[m].base;
+        if(x<b){ hi=m-1; } else if(x>=b+treg[m].len){ lo=m+1; } else return 1; }
     return 0;
 }
 
-static int class_of(size_t n){ for(size_t i=0;i<NCLASS;i++) if(n<=CLASS_SZ[i]) return (int)i; return -1; }
-static void reg_add(void* b, size_t l){ if(nreg<REGMAX){ regs[nreg].base=b; regs[nreg].len=l; nreg++; } }
-static void reg_del(void* b){ for(int i=0;i<nreg;i++) if(regs[i].base==b){ regs[i]=regs[nreg-1]; nreg--; return; } }
-static int reg_find(void* p){ uintptr_t x=(uintptr_t)p; for(int i=0;i<nreg;i++){ uintptr_t b=(uintptr_t)regs[i].base; if(x>=b && x<b+regs[i].len) return i; } return -1; }
+static int class_of(size_t n){
+    int lo=0, hi=(int)NCLASS-1;
+    while(lo<hi){ int m=(lo+hi)>>1; if(CLASS_SZ[m] >= n) hi=m; else lo=m+1; }
+    return CLASS_SZ[lo] >= n ? lo : -1;
+}
+static int reg_find(void* p);
+static void reg_add(void* b, size_t l){
+    if(nreg>=REGMAX) return;
+    uintptr_t key=(uintptr_t)b; int i=nreg;
+    while(i>0 && (uintptr_t)regs[i-1].base > key){ regs[i]=regs[i-1]; i--; }
+    regs[i].base=b; regs[i].len=l; nreg++;
+}
+static void reg_del(void* b){
+    int i=reg_find(b); if(i<0) return;
+    for(int j=i;j<nreg-1;j++) regs[j]=regs[j+1];
+    nreg--;
+}
+static int reg_find(void* p){
+    uintptr_t x=(uintptr_t)p; int lo=0, hi=nreg-1;
+    while(lo<=hi){ int m=(lo+hi)>>1; uintptr_t b=(uintptr_t)regs[m].base;
+        if(x<b){ hi=m-1; } else if(x>=b+regs[m].len){ lo=m+1; } else return m; }
+    return -1;
+}
 static int my_id(void){ if(t_id<0){ glock(); if(t_id<0) t_id=g_next_id++; gunlock(); } return t_id; }
 
 static void* pop_node(void** head){
@@ -84,12 +111,15 @@ static void* pop_node(void** head){
 /* новый bump-регион потока: mmap без лока; в per-thread + глобальный реестр */
 static void* bump(Arena* a, size_t n){
     if(a->off+n > a->cap){
-        size_t cap = 1u<<20;
-        if(n+16 > cap) cap = ((n+16 + (1u<<20)-1) >> 20) << 20; /* регион вмещает большой блок */
+        size_t cap = n*8;                        /* ~8 блоков */
+        cap = (cap + g_region-1) & ~(g_region-1);
+        if(cap < g_region) cap = g_region;       /* минимум: меньше mmap */
+        if(cap > (g_region*4)) cap = g_region*4;
+        if(n+16 > cap) cap = (n+16 + g_region-1) & ~(g_region-1);
         void* m = mmap(NULL, cap, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
         if(m == MAP_FAILED) return NULL;
         a->base = m; a->cap = cap; a->off = 0;
-        if(ntre < 128){ treg[ntre].base = m; treg[ntre].len = cap; ntre++; }
+        treg_add(m, cap);
         glock(); reg_add(m, cap); gunlock();
     }
     void* p = (char*)a->base + a->off; a->off += n; return p;
@@ -160,7 +190,25 @@ static void* (*real_memalign)(size_t,size_t) = NULL;
 static void* (*real_dlmopen)(long,const char*,int) = NULL;
 static void* (*real_dlopen)(const char*,int) = NULL;
 static int real_free_tried = 0;
-static int g_passthrough = -1; /* -1 неизвестно, 0 нет, 1 да */
+static int g_passthrough = -1;
+static int g_prof = 0;
+static size_t g_region = (1u<<20); /* мин. размер региона, GALLOC_REGION_MB */
+static unsigned long long P_mc,P_fc,P_uc,P_rc,P_mcy,P_fcy,P_ucy,P_rcy;
+static inline unsigned long long rdtsc_(void){ unsigned a,d; __asm__ __volatile__("rdtsc":"=a"(a),"=d"(d)); return ((unsigned long long)d<<32)|a; }
+static void prof_report(void);
+static void prof_sig(int sig){
+    prof_report(); signal(sig, SIG_DFL); raise(sig);
+}
+static void prof_report(void){
+    if(!g_prof) return;
+    double ghz=3.2;
+    fprintf(stderr,"[galloc] malloc: %llu calls, %.1f cyc/op\n",P_mc, P_mc? (double)P_mcy/P_mc:0);
+    fprintf(stderr,"[galloc] free  : %llu calls, %.1f cyc/op\n",P_fc, P_fc? (double)P_fcy/P_fc:0);
+    fprintf(stderr,"[galloc] usable: %llu calls, %.1f cyc/op\n",P_uc, P_uc? (double)P_ucy/P_uc:0);
+    fprintf(stderr,"[galloc] realloc:%llu calls, %.1f cyc/op\n",P_rc, P_rc? (double)P_rcy/P_rc:0);
+    fprintf(stderr,"[galloc] ~ns: m=%.1f f=%.1f u=%.1f r=%.1f (@%.1fGHz)\n",
+        P_mc?(double)P_mcy/P_mc/ghz:0, P_fc?(double)P_fcy/P_fc/ghz:0, P_uc?(double)P_ucy/P_uc/ghz:0, P_rc?(double)P_rcy/P_rc/ghz:0, ghz);
+} /* -1 неизвестно, 0 нет, 1 да */
 
 static void phase_free(void* p){
     if(!p) return;
@@ -249,8 +297,12 @@ static void* aligned_impl(size_t align, size_t size){
 }
 
 /* ---------- ABI ---------- */
-void* malloc(size_t n){ if(g_passthrough==1&&real_malloc) return real_malloc(n); return phase_malloc(n); }
+void* malloc(size_t n){
+    if(__builtin_expect(g_prof,0)){ unsigned long long t=rdtsc_(); void* r=(g_passthrough==1&&real_malloc)?real_malloc(n):phase_malloc(n); P_mcy+=rdtsc_()-t; P_mc++; return r; }
+    if(g_passthrough==1&&real_malloc) return real_malloc(n); return phase_malloc(n);
+}
 void free(void* p){
+    if(__builtin_expect(g_prof,0)){ unsigned long long t=rdtsc_(); phase_free(p); P_fcy+=rdtsc_()-t; P_fc++; return; }
     if(g_passthrough==1 && real_free){
         if(p){
             int ours = in_own(p);
@@ -263,6 +315,7 @@ void free(void* p){
 }
 void* calloc(size_t n,size_t s){ if(g_passthrough==1&&real_calloc) return real_calloc(n,s); size_t t; if(__builtin_mul_overflow(n,s,&t)) return NULL; void* p=phase_malloc(t); if(p) memset(p,0,t); return p; }
 void* realloc(void* p,size_t n){
+    if(__builtin_expect(g_prof,0)){ unsigned long long t=rdtsc_(); void* r=realloc(p,n); P_rcy+=rdtsc_()-t; P_rc++; return r; }
     if(g_passthrough==1 && real_realloc){
         if(p==NULL) return real_malloc? real_malloc(n) : realloc(p,n);
         int ours = in_own(p);
@@ -288,6 +341,7 @@ void* aligned_alloc(size_t align,size_t size){ if(g_passthrough==1&&real_memalig
 void* memalign(size_t align,size_t size){ return aligned_impl(align,size); }
 void* valloc(size_t size){ return aligned_impl(4096,size); }
 size_t malloc_usable_size(void* p){
+    if(__builtin_expect(g_prof,0)){ unsigned long long t=rdtsc_(); size_t r=phase_usable(p); P_ucy+=rdtsc_()-t; P_uc++; return r; }
     if(g_passthrough==1 && real_usable){
         if(p){ int ours=in_own(p); if(!ours){ glock(); int r=reg_find(p); gunlock(); ours=r>=0; } if(ours) return phase_usable(p); }
         return real_usable(p);
@@ -325,6 +379,10 @@ static void fork_child(void){ pthread_mutex_init(&g_lock, NULL); holding=0; lown
 __attribute__((constructor)) static void atfork_init(void){
     if(getenv("GALLOC_VERBOSE")) fprintf(stderr,"[galloc] loaded pid=%d\n",(int)getpid());
     g_passthrough = getenv("GALLOC_PASSTHROUGH") ? 1 : 0;
+    g_prof = getenv("GALLOC_PROFILE") ? 1 : 0;
+    { const char* rm=getenv("GALLOC_REGION_MB");
+      if(rm){ long mb=atol(rm); if(mb<1) mb=1; if(mb>64) mb=64; g_region=(size_t)mb<<20; } }
+    if(g_prof){ atexit(prof_report); signal(SIGSEGV, prof_sig); signal(SIGABRT, prof_sig); }
     if(g_passthrough) fprintf(stderr,"[galloc] PASSTHROUGH -> glibc\n");
     /* резолвим настоящие функции заранее — free/realloc никогда не зовут dlsym */
     if(!real_free_tried){ real_free_tried=1;
