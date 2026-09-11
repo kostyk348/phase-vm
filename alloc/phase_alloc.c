@@ -23,7 +23,8 @@
 #define LARGE_BIT   (1ull<<63)
 #define FREE_BIT    (1ull<<62)
 
-static const size_t CLASS_SZ[] = {16,32,48,64,96,128,192,256,384,512,768,1024,1536,2048,3072,4096};
+static const size_t CLASS_SZ[] = {16,32,48,64,96,128,192,256,384,512,768,1024,1536,2048,3072,4096,
+    6144,8192,12288,16384,24576,32768,49152,65536,98304,131072,196608,262144,393216,524288,786432,1048576};
 #define NCLASS (sizeof(CLASS_SZ)/sizeof(CLASS_SZ[0]))
 
 typedef struct { void* base; size_t cap, off; void* free_head; } Arena;
@@ -84,6 +85,7 @@ static void* pop_node(void** head){
 static void* bump(Arena* a, size_t n){
     if(a->off+n > a->cap){
         size_t cap = 1u<<20;
+        if(n+16 > cap) cap = ((n+16 + (1u<<20)-1) >> 20) << 20; /* регион вмещает большой блок */
         void* m = mmap(NULL, cap, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
         if(m == MAP_FAILED) return NULL;
         a->base = m; a->cap = cap; a->off = 0;
@@ -150,7 +152,15 @@ static void* phase_malloc(size_t n){
 
 /* ---------- free ---------- */
 static void (*real_free)(void*) = NULL;
+static void* (*real_malloc)(size_t) = NULL;
+static void* (*real_realloc)(void*,size_t) = NULL;
+static void* (*real_calloc)(size_t,size_t) = NULL;
+static size_t (*real_usable)(void*) = NULL;
+static void* (*real_memalign)(size_t,size_t) = NULL;
+static void* (*real_dlmopen)(long,const char*,int) = NULL;
+static void* (*real_dlopen)(const char*,int) = NULL;
 static int real_free_tried = 0;
+static int g_passthrough = -1; /* -1 неизвестно, 0 нет, 1 да */
 
 static void phase_free(void* p){
     if(!p) return;
@@ -239,10 +249,26 @@ static void* aligned_impl(size_t align, size_t size){
 }
 
 /* ---------- ABI ---------- */
-void* malloc(size_t n){ return phase_malloc(n); }
-void free(void* p){ phase_free(p); }
-void* calloc(size_t n,size_t s){ size_t t; if(__builtin_mul_overflow(n,s,&t)) return NULL; void* p=phase_malloc(t); if(p) memset(p,0,t); return p; }
+void* malloc(size_t n){ if(g_passthrough==1&&real_malloc) return real_malloc(n); return phase_malloc(n); }
+void free(void* p){
+    if(g_passthrough==1 && real_free){
+        if(p){
+            int ours = in_own(p);
+            if(!ours){ glock(); int r=reg_find(p); gunlock(); ours = r>=0; }
+            if(ours){ phase_free(p); return; }
+        }
+        real_free(p); return;
+    }
+    phase_free(p);
+}
+void* calloc(size_t n,size_t s){ if(g_passthrough==1&&real_calloc) return real_calloc(n,s); size_t t; if(__builtin_mul_overflow(n,s,&t)) return NULL; void* p=phase_malloc(t); if(p) memset(p,0,t); return p; }
 void* realloc(void* p,size_t n){
+    if(g_passthrough==1 && real_realloc){
+        if(p==NULL) return real_malloc? real_malloc(n) : realloc(p,n);
+        int ours = in_own(p);
+        if(!ours){ glock(); int r=reg_find(p); gunlock(); ours = r>=0; }
+        if(!ours) return real_realloc(p,n);
+    }
     if(!p) return phase_malloc(n);
     if(!n){ phase_free(p); return NULL; }
     size_t old = phase_usable(p);
@@ -258,25 +284,58 @@ int posix_memalign(void** m,size_t align,size_t size){
     if(align & (align-1)) return 22;
     void* p = aligned_impl(align,size); if(!p) return 12; *m = p; return 0;
 }
-void* aligned_alloc(size_t align,size_t size){ return aligned_impl(align,size); }
+void* aligned_alloc(size_t align,size_t size){ if(g_passthrough==1&&real_memalign) return real_memalign(align,size); return aligned_impl(align,size); }
 void* memalign(size_t align,size_t size){ return aligned_impl(align,size); }
 void* valloc(size_t size){ return aligned_impl(4096,size); }
-size_t malloc_usable_size(void* p){ return phase_usable(p); }
+size_t malloc_usable_size(void* p){
+    if(g_passthrough==1 && real_usable){
+        if(p){ int ours=in_own(p); if(!ours){ glock(); int r=reg_find(p); gunlock(); ours=r>=0; } if(ours) return phase_usable(p); }
+        return real_usable(p);
+    }
+    return phase_usable(p);
+}
 char* strdup(const char* s){ size_t n=strlen(s)+1; char* p=malloc(n); if(p) memcpy(p,s,n); return p; }
 char* strndup(const char* s,size_t m){ size_t n=0; while(n<m && s[n]) n++; char* p=malloc(n+1); if(p){ memcpy(p,s,n); p[n]=0; } return p; }
 void cfree(void* p){ phase_free(p); }
-void* __libc_malloc(size_t n){ return phase_malloc(n); }
-void __libc_free(void* p){ phase_free(p); }
-void* __libc_calloc(size_t n,size_t s){ return calloc(n,s); }
-void* __libc_realloc(void* p,size_t n){ return realloc(p,n); }
+void* __libc_malloc(size_t n){ if(g_passthrough==1&&real_malloc) return real_malloc(n); return phase_malloc(n); }
+void __libc_free(void* p){ if(g_passthrough==1){ free(p); return; } phase_free(p); }
+void* __libc_calloc(size_t n,size_t s){ if(g_passthrough==1&&real_calloc) return real_calloc(n,s); return calloc(n,s); }
+void* __libc_realloc(void* p,size_t n){ if(g_passthrough==1&&real_realloc){ if(!p) return real_realloc(p,n); int ours=in_own(p); if(!ours){ glock(); int r=reg_find(p); gunlock(); ours=r>=0; } if(!ours) return real_realloc(p,n); } return realloc(p,n); }
 void* __libc_memalign(size_t a,size_t n){ return aligned_impl(a,n); }
 void* __libc_valloc(size_t n){ return aligned_impl(4096,n); }
+
+/* SteamAPI использует dlmopen(RTLD_DEEPBIND): тогда его malloc/realloc уходят
+   в glibc-копию, а наши указатели -> mismatch. Снимаем DEEPBIND, чтобы обе
+   стороны видели один (наш) аллокатор. */
+#ifndef RTLD_DEEPBIND
+#define RTLD_DEEPBIND 0x00008
+#endif
+void* dlmopen(long ns, const char* file, int mode){
+    if(!real_dlmopen){ real_dlmopen=(void*(*)(long,const char*,int))dlsym(RTLD_NEXT,"dlmopen"); }
+    if(real_dlmopen && !g_passthrough && (mode & RTLD_DEEPBIND))
+        fprintf(stderr,"[galloc] dlmopen: drop DEEPBIND for %s\n", file?file:"?");
+    return real_dlmopen(ns, file, g_passthrough? mode : (mode & ~RTLD_DEEPBIND));
+}
+void* dlopen(const char* file, int mode){
+    if(!real_dlopen){ real_dlopen=(void*(*)(const char*,int))dlsym(RTLD_NEXT,"dlopen"); }
+    return real_dlopen(file, g_passthrough? mode : (mode & ~RTLD_DEEPBIND));
+}
 
 static void fork_child(void){ pthread_mutex_init(&g_lock, NULL); holding=0; lowner=NULL; }
 __attribute__((constructor)) static void atfork_init(void){
     if(getenv("GALLOC_VERBOSE")) fprintf(stderr,"[galloc] loaded pid=%d\n",(int)getpid());
-    /* резолвим настоящий free заранее — чтобы free() никогда не звал dlsym */
-    if(!real_free_tried){ real_free_tried=1; real_free=(void(*)(void*))dlsym(RTLD_NEXT,"free"); }
+    g_passthrough = getenv("GALLOC_PASSTHROUGH") ? 1 : 0;
+    if(g_passthrough) fprintf(stderr,"[galloc] PASSTHROUGH -> glibc\n");
+    /* резолвим настоящие функции заранее — free/realloc никогда не зовут dlsym */
+    if(!real_free_tried){ real_free_tried=1;
+        real_malloc=(void*(*)(size_t))dlsym(RTLD_NEXT,"malloc");
+        real_free=(void(*)(void*))dlsym(RTLD_NEXT,"free");
+        real_realloc=(void*(*)(void*,size_t))dlsym(RTLD_NEXT,"realloc");
+        real_calloc=(void*(*)(size_t,size_t))dlsym(RTLD_NEXT,"calloc");
+        real_usable=(size_t(*)(void*))dlsym(RTLD_NEXT,"malloc_usable_size");
+        real_memalign=(void*(*)(size_t,size_t))dlsym(RTLD_NEXT,"memalign");
+        real_dlmopen=(void*(*)(long,const char*,int))dlsym(RTLD_NEXT,"dlmopen");
+        real_dlopen=(void*(*)(const char*,int))dlsym(RTLD_NEXT,"dlopen"); }
     pthread_mutexattr_t a; pthread_mutexattr_init(&a);
     pthread_mutexattr_setrobust(&a, PTHREAD_MUTEX_ROBUST);
     pthread_mutex_init(&g_lock, &a);
