@@ -416,13 +416,13 @@ void* __libc_valloc(size_t n){ return aligned_impl(4096,n); }
 #define RTLD_DEEPBIND 0x00008
 #endif
 void* dlmopen(long ns, const char* file, int mode){
-    if(!real_dlmopen){ real_dlmopen=(void*(*)(long,const char*,int))dlsym(RTLD_NEXT,"dlmopen"); }
+    if(!real_dlmopen){ return NULL; }
     if(real_dlmopen && !g_passthrough && (mode & RTLD_DEEPBIND))
         fprintf(stderr,"[galloc] dlmopen: drop DEEPBIND for %s\n", file?file:"?");
     return real_dlmopen(ns, file, g_passthrough? mode : (mode & ~RTLD_DEEPBIND));
 }
 void* dlopen(const char* file, int mode){
-    if(!real_dlopen){ real_dlopen=(void*(*)(const char*,int))dlsym(RTLD_NEXT,"dlopen"); }
+    if(!real_dlopen){ return NULL; }
     return real_dlopen(file, g_passthrough? mode : (mode & ~RTLD_DEEPBIND));
 }
 
@@ -454,6 +454,10 @@ __attribute__((constructor)) static void atfork_init(void){
         real_memalign=(void*(*)(size_t,size_t))dlsym(RTLD_NEXT,"memalign");
         real_dlmopen=(void*(*)(long,const char*,int))dlsym(RTLD_NEXT,"dlmopen");
         real_dlopen=(void*(*)(const char*,int))dlsym(RTLD_NEXT,"dlopen"); }
+    /* dlopen/dlmopen тоже резолвим заранее: вызов dlsym во время static-init
+       других библиотек (TBB) ломает loader-lock */
+    if(!real_dlopen) real_dlopen=(void*(*)(const char*,int))dlsym(RTLD_NEXT,"dlopen");
+    if(!real_dlmopen) real_dlmopen=(void*(*)(long,const char*,int))dlsym(RTLD_NEXT,"dlmopen");
     pthread_mutexattr_t a; pthread_mutexattr_init(&a);
     pthread_mutexattr_setrobust(&a, PTHREAD_MUTEX_ROBUST);
     pthread_mutex_init(&g_lock, &a);

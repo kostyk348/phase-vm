@@ -32,3 +32,21 @@ free/usable своих блоков; глобальный lock только дл
 Запуск проверок:
   make && ./api && LD_PRELOAD=$PWD/libphase_alloc.so ./api
   ./stress && LD_PRELOAD=$PWD/libphase_alloc.so ./stress   # MT 8 потоков
+
+
+## Совместимость с играми (важно)
+
+Некоторые игры тащат СВОИ аллокаторы (Paradox/Clausewitz, Chromium/CEF, Intel TBB)
+и НЕ переносят подмену `malloc` вообще — даже минимальный форвард в glibc валит их
+(`terminate called without an active exception`). Проверка перед использованием:
+
+    ./galloc_probe.sh "/path/to/game/binary"
+
+- `empty.so: RUNNING`, `min malloc.so: RUNNING` → аллокатор применим;
+- `min malloc.so: EXIT:*` → игра не переносит подмену malloc, НЕ использовать.
+
+Результаты:
+- **Maestro's Cold War 2** (native Godot): работает, загрузка +6% к glibc,
+  RAM ~15x меньше. `LD_PRELOAD=.../libphase_alloc.so %command%`
+- **Hearts of Iron IV** (Paradox + CEF + TBB): НЕ поддерживается — игра падает
+  даже с минимальным форвардом (проверено `galloc_probe.sh`). Запускать без прелоада.
