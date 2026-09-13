@@ -29,19 +29,20 @@ static const size_t CLASS_SZ[] = {16,32,48,64,96,128,192,256,384,512,768,1024,15
     6144,8192,12288,16384,24576,32768,49152,65536,98304,131072,196608,262144,393216,524288,786432,1048576};
 #define NCLASS (sizeof(CLASS_SZ)/sizeof(CLASS_SZ[0]))
 static size_t g_region = (1u<<20); /* мин. размер региона; GALLOC_REGION_MB */
+static int g_ctor_done = 0;
 
 typedef struct { void* base; size_t cap, off; void* free_head; } Arena;
 static void* volatile g_pend[NCLASS];         /* чужие: lock-free stack */
 static __thread Arena t_a[NCLASS];            /* приватные арены потока */
 static __thread int t_id = -1;
 static int g_next_id = 1;
-static pthread_mutex_t g_lock;
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile void* lowner = 0;
 static __thread int holding = 0;
 
 static void glock(void){
     if(holding){ fprintf(stderr,"[galloc] SELF-RELOCK ra=%p\n",__builtin_return_address(0)); abort(); }
-    const char* w = getenv("GALLOC_LOCKWARN_MS");
+    const char* w = g_ctor_done ? getenv("GALLOC_LOCKWARN_MS") : NULL;
     if(w){
         long ms = atol(w);
         struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts);
@@ -51,8 +52,7 @@ static void glock(void){
         if(r == ETIMEDOUT){ fprintf(stderr,"[galloc] LOCK WAIT >%ldms ra=%p\n", ms, __builtin_return_address(0)); pthread_mutex_lock(&g_lock); }
         else if(r == EOWNERDEAD) pthread_mutex_consistent(&g_lock);
     } else {
-        int r = pthread_mutex_lock(&g_lock);
-        if(r == EOWNERDEAD) pthread_mutex_consistent(&g_lock);
+        pthread_mutex_lock(&g_lock);
     }
     holding = 1; lowner = (void*)pthread_self();
 }
@@ -64,20 +64,28 @@ static Reg regs[REGMAX];
 static int nreg = 0;
 
 /* per-thread bump-регионы — проверка владения БЕЗ лока */
-static __thread struct { void* base; size_t len; } treg[128];
+static __thread struct { void* base; size_t len; int cls; } treg[128];
 static __thread int ntre = 0;
-static void treg_add(void* b, size_t l){
+/* direct-mapped кэш регионов: O(1) проверка владения */
+static __thread struct { void* base; size_t len; int cls; } rcache[64];
+static void treg_add(void* b, size_t l, int cls){
     if(ntre>=128) return;
     uintptr_t key=(uintptr_t)b; int i=ntre;
     while(i>0 && (uintptr_t)treg[i-1].base > key){ treg[i]=treg[i-1]; i--; }
-    treg[i].base=b; treg[i].len=l; ntre++;
+    treg[i].base=b; treg[i].len=l; treg[i].cls=cls; ntre++;
+    int ci=((uintptr_t)b>>21)&63; rcache[ci].base=b; rcache[ci].len=l; rcache[ci].cls=cls;
 }
-static int in_own(void* p){
-    uintptr_t x=(uintptr_t)p; int lo=0, hi=ntre-1;
+/* возвращает класс региона (или -1), O(1) в типичном случае */
+static int in_own_cls(void* p){
+    uintptr_t x=(uintptr_t)p; int ci=(x>>21)&63;
+    { void* b=rcache[ci].base; if(b && x>=(uintptr_t)b && x<(uintptr_t)b+rcache[ci].len) return rcache[ci].cls; }
+    int lo=0, hi=ntre-1;
     while(lo<=hi){ int m=(lo+hi)>>1; uintptr_t b=(uintptr_t)treg[m].base;
-        if(x<b){ hi=m-1; } else if(x>=b+treg[m].len){ lo=m+1; } else return 1; }
-    return 0;
+        if(x<b){ hi=m-1; } else if(x>=b+treg[m].len){ lo=m+1; }
+        else { rcache[ci].base=treg[m].base; rcache[ci].len=treg[m].len; rcache[ci].cls=treg[m].cls; return treg[m].cls; } }
+    return -1;
 }
+static int in_own(void* p){ return in_own_cls(p)>=0; }
 
 static int8_t g_small_cls[257]; /* (n+15)>>4 для n<=4096 -> class */
 static void cls_table_init(void){
@@ -85,7 +93,9 @@ static void cls_table_init(void){
         int lo=0, hi=(int)NCLASS-1; while(lo<hi){int m=(lo+hi)>>1; if(CLASS_SZ[m]>=n) hi=m; else lo=m+1;}
         g_small_cls[i]= CLASS_SZ[lo]>=n ? (int8_t)lo : -1; }
 }
+static int g_cls_ready = 0;
 static int class_of(size_t n){
+    if(!g_cls_ready){ cls_table_init(); g_cls_ready = 1; }
     if(n<=4096) return g_small_cls[(n+15)>>4];
     int lo=16, hi=(int)NCLASS-1;
     while(lo<hi){ int m=(lo+hi)>>1; if(CLASS_SZ[m] >= n) hi=m; else lo=m+1; }
@@ -118,7 +128,7 @@ static void* pop_node(void** head){
 }
 
 /* новый bump-регион потока: mmap без лока; в per-thread + глобальный реестр */
-static void* bump(Arena* a, size_t n){
+static void* bump(Arena* a, size_t n, int cls){
     if(a->off+n > a->cap){
         size_t cap = n*8;                        /* ~8 блоков */
         cap = (cap + g_region-1) & ~(g_region-1);
@@ -128,7 +138,7 @@ static void* bump(Arena* a, size_t n){
         void* m = mmap(NULL, cap, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
         if(m == MAP_FAILED) return NULL;
         a->base = m; a->cap = cap; a->off = 0;
-        treg_add(m, cap);
+        treg_add(m, cap, cls);
         glock(); reg_add(m, cap); gunlock();
     }
     void* p = (char*)a->base + a->off; a->off += n; return p;
@@ -173,7 +183,7 @@ static void* phase_malloc(size_t n){
         void* list = __atomic_exchange_n(&g_pend[c], NULL, __ATOMIC_ACQ_REL);
         if(list){ a->free_head = list; }
         if(a->free_head){ return pop_node(&a->free_head); }
-        void* p = bump(a, CLASS_SZ[c]+16);
+        void* p = bump(a, CLASS_SZ[c]+16, c);
         if(!p) return NULL;
         ((uint64_t*)p)[0] = CLASS_MAGIC|((uint64_t)c<<32);
         ((uint64_t*)p)[1] = (uint32_t)id;
@@ -245,15 +255,10 @@ static void phase_free(void* p){
     if(!p) return;
     if(fr_depth>0 && (char*)p>=(char*)fr_base && (char*)p<(char*)fr_base+fr_used) return;
     int me = my_id();
-    /* БЫСТРО: блок из региона этого потока — без лока */
-    if(in_own(p)){
-        uint64_t h = *(uint64_t*)((char*)p-16);
-        if((h&0xffffffffu)==CLASS_MAGIC && !(h&LARGE_BIT) && !(h&FREE_BIT)){
-            int c = (int)((h>>32)&0xff);
-            *((uint64_t*)((char*)p-16)) = CLASS_MAGIC|((uint64_t)c<<32)|FREE_BIT;
-            if(c>=0 && c<(int)NCLASS){ *(void**)p = t_a[c].free_head; t_a[c].free_head = p; }
-            return;
-        }
+    /* БЫСТРО: регион этого потока -> класс известен из региона, БЕЗ заголовка */
+    {
+        int c = in_own_cls(p);
+        if(c >= 0){ *(void**)p = t_a[c].free_head; t_a[c].free_head = p; return; }
     }
     /* не наш регион: если это НАШ блок (класс) — lock-free push в pending */
     {
@@ -307,13 +312,7 @@ static void phase_free(void* p){
 static size_t phase_usable(void* p){
     if(!p) return 0;
     if(fr_depth>0 && (char*)p>=(char*)fr_base && (char*)p<(char*)fr_base+fr_used) return fr_used-((char*)p-(char*)fr_base);
-    if(in_own(p)){
-        uint64_t h = *(uint64_t*)((char*)p-16);
-        if((h&0xffffffffu)==CLASS_MAGIC && !(h&LARGE_BIT)){
-            int c = (int)((h>>32)&0xff);
-            return c>=0 && c<(int)NCLASS ? CLASS_SZ[c] : 0;
-        }
-    }
+    { int c = in_own_cls(p); if(c>=0) return CLASS_SZ[c]; }
     size_t r = 0;
     glock();
     if(reg_find(p) >= 0){ uint64_t h=*(uint64_t*)((char*)p-16);
@@ -416,13 +415,13 @@ void* __libc_valloc(size_t n){ return aligned_impl(4096,n); }
 #define RTLD_DEEPBIND 0x00008
 #endif
 void* dlmopen(long ns, const char* file, int mode){
-    if(!real_dlmopen){ return NULL; }
+    if(!real_dlmopen){ real_dlmopen=(void*(*)(long,const char*,int))dlsym(RTLD_NEXT,"dlmopen"); if(!real_dlmopen) return NULL; }
     if(real_dlmopen && !g_passthrough && (mode & RTLD_DEEPBIND))
         fprintf(stderr,"[galloc] dlmopen: drop DEEPBIND for %s\n", file?file:"?");
     return real_dlmopen(ns, file, g_passthrough? mode : (mode & ~RTLD_DEEPBIND));
 }
 void* dlopen(const char* file, int mode){
-    if(!real_dlopen){ return NULL; }
+    if(!real_dlopen){ real_dlopen=(void*(*)(const char*,int))dlsym(RTLD_NEXT,"dlopen"); if(!real_dlopen) return NULL; }
     return real_dlopen(file, g_passthrough? mode : (mode & ~RTLD_DEEPBIND));
 }
 
@@ -458,8 +457,6 @@ __attribute__((constructor)) static void atfork_init(void){
        других библиотек (TBB) ломает loader-lock */
     if(!real_dlopen) real_dlopen=(void*(*)(const char*,int))dlsym(RTLD_NEXT,"dlopen");
     if(!real_dlmopen) real_dlmopen=(void*(*)(long,const char*,int))dlsym(RTLD_NEXT,"dlmopen");
-    pthread_mutexattr_t a; pthread_mutexattr_init(&a);
-    pthread_mutexattr_setrobust(&a, PTHREAD_MUTEX_ROBUST);
-    pthread_mutex_init(&g_lock, &a);
+    g_ctor_done = 1;
     pthread_atfork(NULL, NULL, fork_child);
 }

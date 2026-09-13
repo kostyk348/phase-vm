@@ -48,5 +48,8 @@ free/usable своих блоков; глобальный lock только дл
 Результаты:
 - **Maestro's Cold War 2** (native Godot): работает, загрузка +6% к glibc,
   RAM ~15x меньше. `LD_PRELOAD=.../libphase_alloc.so %command%`
-- **Hearts of Iron IV** (Paradox + CEF + TBB): НЕ поддерживается — игра падает
-  даже с минимальным форвардом (проверено `galloc_probe.sh`). Запускать без прелоада.
+- **Hearts of Iron IV** (Paradox + CEF + TBB): **РАБОТАЕТ** (после фикса).
+  Причина прежних падений: TBB вызывает malloc ДО нашего конструктора;
+  если аллокатор зависит от ctor (mutex/таблица/dlsym) — init TBB падает.
+  Фикс: статический мьютекс, ленивая таблица классов, никакой зависимости
+  от конструктора в hot-path. Проверять `./galloc_probe.sh <binary>`.
