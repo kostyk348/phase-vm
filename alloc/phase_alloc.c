@@ -18,6 +18,7 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <signal.h>
+#include <sys/time.h>
 
 #define CLASS_MAGIC 0xFA5E0001u
 #define ALIGN_MAGIC 0xFA5E0002u
@@ -30,7 +31,7 @@ static const size_t CLASS_SZ[] = {16,32,48,64,96,128,192,256,384,512,768,1024,15
 static size_t g_region = (1u<<20); /* мин. размер региона; GALLOC_REGION_MB */
 
 typedef struct { void* base; size_t cap, off; void* free_head; } Arena;
-static Arena g_pending[NCLASS];               /* чужие (под lock) */
+static void* volatile g_pend[NCLASS];         /* чужие: lock-free stack */
 static __thread Arena t_a[NCLASS];            /* приватные арены потока */
 static __thread int t_id = -1;
 static int g_next_id = 1;
@@ -78,8 +79,15 @@ static int in_own(void* p){
     return 0;
 }
 
+static int8_t g_small_cls[257]; /* (n+15)>>4 для n<=4096 -> class */
+static void cls_table_init(void){
+    for(int i=0;i<=256;i++){ size_t n=(size_t)i<<4; if(n==0) n=1;
+        int lo=0, hi=(int)NCLASS-1; while(lo<hi){int m=(lo+hi)>>1; if(CLASS_SZ[m]>=n) hi=m; else lo=m+1;}
+        g_small_cls[i]= CLASS_SZ[lo]>=n ? (int8_t)lo : -1; }
+}
 static int class_of(size_t n){
-    int lo=0, hi=(int)NCLASS-1;
+    if(n<=4096) return g_small_cls[(n+15)>>4];
+    int lo=16, hi=(int)NCLASS-1;
     while(lo<hi){ int m=(lo+hi)>>1; if(CLASS_SZ[m] >= n) hi=m; else lo=m+1; }
     return CLASS_SZ[lo] >= n ? lo : -1;
 }
@@ -161,10 +169,9 @@ static void* phase_malloc(size_t n){
     if(c >= 0){
         Arena* a = &t_a[c];
         if(a->free_head){ return pop_node(&a->free_head); }
-        /* редко: забрать чужие (pending) */
-        glock();
-        if(g_pending[c].free_head){ a->free_head = g_pending[c].free_head; g_pending[c].free_head = NULL; }
-        gunlock();
+        /* забрать чужие из lock-free очереди */
+        void* list = __atomic_exchange_n(&g_pend[c], NULL, __ATOMIC_ACQ_REL);
+        if(list){ a->free_head = list; }
         if(a->free_head){ return pop_node(&a->free_head); }
         void* p = bump(a, CLASS_SZ[c]+16);
         if(!p) return NULL;
@@ -196,6 +203,30 @@ static int g_prof = 0;
 static unsigned long long P_mc,P_fc,P_uc,P_rc,P_mcy,P_fcy,P_ucy,P_rcy;
 static inline unsigned long long rdtsc_(void){ unsigned a,d; __asm__ __volatile__("rdtsc":"=a"(a),"=d"(d)); return ((unsigned long long)d<<32)|a; }
 static void prof_report(void);
+static void* prof_watch(void* a);
+static volatile int g_watch_started = 0;
+
+/* async-signal-safe запись числа */
+static int wu(char* b, unsigned long long v){ char t[24]; int n=0; if(!v){b[0]='0';return 1;} while(v){t[n++]=(char)('0'+v%10); v/=10;} for(int i=0;i<n;i++) b[i]=t[n-1-i]; return n; }
+static void* prof_watch(void* a){
+    (void)a;
+    for(;;){ struct timespec ts={2,0}; nanosleep(&ts,NULL); prof_report(); }
+    return NULL;
+}
+static void prof_alarm(int sig){
+    (void)sig;
+    char b[256]; int p=0;
+    const char* pre="[galloc] m="; while(*pre) b[p++]=*pre++;
+    p+=wu(b+p,P_mc); const char* c1="c/"; while(*c1) b[p++]=*c1++;
+    p+=wu(b+p, P_mc?(P_mcy/P_mc):0); const char* c2="cyc f="; while(*c2) b[p++]=*c2++;
+    p+=wu(b+p,P_fc); const char* c3="c/"; while(*c3) b[p++]=*c3++;
+    p+=wu(b+p, P_fc?(P_fcy/P_fc):0); const char* c4="cyc u="; while(*c4) b[p++]=*c4++;
+    p+=wu(b+p,P_uc); const char* c5="c/"; while(*c5) b[p++]=*c5++;
+    p+=wu(b+p, P_uc?(P_ucy/P_uc):0); const char* c6="cyc r="; while(*c6) b[p++]=*c6++;
+    p+=wu(b+p,P_rc); const char* c7="c/"; while(*c7) b[p++]=*c7++;
+    p+=wu(b+p, P_rc?(P_rcy/P_rc):0); b[p++]='\n';
+    ssize_t wr = write(2,b,(size_t)p); (void)wr;
+}
 static void prof_sig(int sig){
     prof_report(); signal(sig, SIG_DFL); raise(sig);
 }
@@ -224,6 +255,20 @@ static void phase_free(void* p){
             return;
         }
     }
+    /* не наш регион: если это НАШ блок (класс) — lock-free push в pending */
+    {
+        uint64_t h2 = *(uint64_t*)((char*)p-16);
+        if((h2 & 0xffffffffu)==CLASS_MAGIC && !(h2 & LARGE_BIT)){
+            int c2 = (int)((h2>>32)&0xff);
+            if(c2>=0 && c2<(int)NCLASS && !(h2 & FREE_BIT)){
+                *((uint64_t*)((char*)p-16)) = CLASS_MAGIC|((uint64_t)c2<<32)|FREE_BIT;
+                void* head;
+                do { head = g_pend[c2]; *(void**)p = head; }
+                while(!__atomic_compare_exchange_n(&g_pend[c2], &head, p, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+                return;
+            }
+        }
+    }
     /* МЕДЛЕННО: чужой/большой/aligned */
     glock();
     if(reg_find(p) < 0){
@@ -246,7 +291,8 @@ static void phase_free(void* p){
         if(c>=0 && c<(int)NCLASS && !(h&FREE_BIT)){
             *((uint64_t*)((char*)p-16)) = CLASS_MAGIC|((uint64_t)c<<32)|FREE_BIT;
             if(own == (uint32_t)me){ *(void**)p = t_a[c].free_head; t_a[c].free_head = p; }
-            else { *(void**)p = g_pending[c].free_head; g_pending[c].free_head = p; }
+            else { void* hd; do { hd = g_pend[c]; *(void**)p = hd; }
+                   while(!__atomic_compare_exchange_n(&g_pend[c], &hd, p, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)); }
         }
         gunlock(); return;
     }
@@ -298,7 +344,8 @@ static void* aligned_impl(size_t align, size_t size){
 
 /* ---------- ABI ---------- */
 void* malloc(size_t n){
-    if(__builtin_expect(g_prof,0)){ unsigned long long t=rdtsc_(); void* r=(g_passthrough==1&&real_malloc)?real_malloc(n):phase_malloc(n); P_mcy+=rdtsc_()-t; P_mc++; return r; }
+    if(__builtin_expect(g_prof,0)){
+        unsigned long long t=rdtsc_(); void* r=(g_passthrough==1&&real_malloc)?real_malloc(n):phase_malloc(n); P_mcy+=rdtsc_()-t; P_mc++; return r; }
     if(g_passthrough==1&&real_malloc) return real_malloc(n); return phase_malloc(n);
 }
 void free(void* p){
@@ -314,8 +361,12 @@ void free(void* p){
     phase_free(p);
 }
 void* calloc(size_t n,size_t s){ if(g_passthrough==1&&real_calloc) return real_calloc(n,s); size_t t; if(__builtin_mul_overflow(n,s,&t)) return NULL; void* p=phase_malloc(t); if(p) memset(p,0,t); return p; }
+static void* realloc_impl(void* p, size_t n);
 void* realloc(void* p,size_t n){
-    if(__builtin_expect(g_prof,0)){ unsigned long long t=rdtsc_(); void* r=realloc(p,n); P_rcy+=rdtsc_()-t; P_rc++; return r; }
+    if(__builtin_expect(g_prof,0)){ unsigned long long t=rdtsc_(); void* r=realloc_impl(p,n); P_rcy+=rdtsc_()-t; P_rc++; return r; }
+    return realloc_impl(p,n);
+}
+static void* realloc_impl(void* p,size_t n){
     if(g_passthrough==1 && real_realloc){
         if(p==NULL) return real_malloc? real_malloc(n) : realloc(p,n);
         int ours = in_own(p);
@@ -380,9 +431,18 @@ __attribute__((constructor)) static void atfork_init(void){
     if(getenv("GALLOC_VERBOSE")) fprintf(stderr,"[galloc] loaded pid=%d\n",(int)getpid());
     g_passthrough = getenv("GALLOC_PASSTHROUGH") ? 1 : 0;
     g_prof = getenv("GALLOC_PROFILE") ? 1 : 0;
+    if(g_prof && getenv("GALLOC_VERBOSE")) fprintf(stderr,"[galloc] PROFILE on\n");
+    cls_table_init();
     { const char* rm=getenv("GALLOC_REGION_MB");
       if(rm){ long mb=atol(rm); if(mb<1) mb=1; if(mb>64) mb=64; g_region=(size_t)mb<<20; } }
-    if(g_prof){ atexit(prof_report); signal(SIGSEGV, prof_sig); signal(SIGABRT, prof_sig); }
+    if(g_prof){
+        atexit(prof_report);
+        signal(SIGINT, prof_sig); signal(SIGTERM, prof_sig);
+        signal(SIGSEGV, prof_sig); signal(SIGABRT, prof_sig);
+        signal(SIGALRM, prof_alarm);
+        struct itimerval it; it.it_interval.tv_sec=2; it.it_interval.tv_usec=0;
+        it.it_value=it.it_interval; setitimer(ITIMER_REAL,&it,NULL);
+    }
     if(g_passthrough) fprintf(stderr,"[galloc] PASSTHROUGH -> glibc\n");
     /* резолвим настоящие функции заранее — free/realloc никогда не зовут dlsym */
     if(!real_free_tried){ real_free_tried=1;
