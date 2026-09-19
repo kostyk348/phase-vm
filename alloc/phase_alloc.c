@@ -28,8 +28,9 @@
 static const size_t CLASS_SZ[] = {16,32,48,64,96,128,192,256,384,512,768,1024,1536,2048,3072,4096,
     6144,8192,12288,16384,24576,32768,49152,65536,98304,131072,196608,262144,393216,524288,786432,1048576};
 #define NCLASS (sizeof(CLASS_SZ)/sizeof(CLASS_SZ[0]))
-static size_t g_region = (1u<<20); /* мин. размер региона; GALLOC_REGION_MB */
+static size_t g_region = (2u<<20); /* мин. размер региона; GALLOC_REGION_MB */
 static int g_ctor_done = 0;
+static int g_diary = 0;
 
 typedef struct { void* base; size_t cap, off; void* free_head; } Arena;
 static void* volatile g_pend[NCLASS];         /* чужие: lock-free stack */
@@ -137,6 +138,7 @@ static void* bump(Arena* a, size_t n, int cls){
         if(n+16 > cap) cap = (n+16 + g_region-1) & ~(g_region-1);
         void* m = mmap(NULL, cap, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
         if(m == MAP_FAILED) return NULL;
+        if(cap >= (2u<<20)) madvise(m, cap, MADV_HUGEPAGE); /* THP: меньше fault/TLB */
         a->base = m; a->cap = cap; a->off = 0;
         treg_add(m, cap, cls);
         glock(); reg_add(m, cap); gunlock();
@@ -153,13 +155,23 @@ static pthread_once_t key_once = PTHREAD_ONCE_INIT;
 static void bump_dtor(void* p){ if(p) munmap(p, (size_t)64u<<20); }
 static void key_init(void){ pthread_key_create(&key, bump_dtor); }
 
-void pa_frame_begin(void){
+static void ensure_frame(size_t cap){
     pthread_once(&key_once, key_init);
+    if(!fr_base){
+        fr_cap = cap;
+        fr_base = mmap(NULL, fr_cap, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if(fr_base == MAP_FAILED){ fr_base = NULL; fr_cap = 0; return; }
+        pthread_setspecific(key, fr_base);
+    }
+}
+/* append-only дневник: закладка и откат к ней */
+void* galloc_mark(void){ return (void*)(uintptr_t)fr_used; }
+void galloc_rewind(void* m){ fr_used = (size_t)(uintptr_t)m; }
+
+void pa_frame_begin(void){
     if(fr_depth == 0){
-        if(!fr_base){ fr_cap = 64u<<20;
-            fr_base = mmap(NULL, fr_cap, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-            if(fr_base == MAP_FAILED){ fr_base = NULL; return; }
-            pthread_setspecific(key, fr_base); }
+        ensure_frame(64u<<20);
+        if(!fr_base) return;
         fr_used = 0;
     }
     fr_depth++;
@@ -170,6 +182,13 @@ int pa_frame_active(void){ return fr_depth>0; }
 /* ---------- malloc ---------- */
 static void* phase_malloc(size_t n){
     if(n == 0) n = 1;
+    if(g_diary){
+        if(!fr_base) ensure_frame(512u<<20);
+        if(fr_base){
+            size_t need = (n+15) & ~(size_t)15;
+            if(fr_used + need <= fr_cap){ void* p = (char*)fr_base + fr_used; fr_used += need; return p; }
+        }
+    }
     if(fr_depth > 0){
         size_t need = (n+15)&~(size_t)15; if(need == 0) need = 16;
         if(fr_used+need <= fr_cap){ void* p=(char*)fr_base+fr_used; fr_used+=need; return p; }
@@ -253,6 +272,7 @@ static void prof_report(void){
 
 static void phase_free(void* p){
     if(!p) return;
+    if(g_diary && fr_base && (char*)p >= (char*)fr_base && (char*)p < (char*)fr_base + fr_used) return; /* надгробие */
     if(fr_depth>0 && (char*)p>=(char*)fr_base && (char*)p<(char*)fr_base+fr_used) return;
     int me = my_id();
     /* БЫСТРО: регион этого потока -> класс известен из региона, БЕЗ заголовка */
@@ -429,6 +449,8 @@ static void fork_child(void){ pthread_mutex_init(&g_lock, NULL); holding=0; lown
 __attribute__((constructor)) static void atfork_init(void){
     if(getenv("GALLOC_VERBOSE")) fprintf(stderr,"[galloc] loaded pid=%d\n",(int)getpid());
     g_passthrough = getenv("GALLOC_PASSTHROUGH") ? 1 : 0;
+    g_diary = getenv("GALLOC_DIARY") ? 1 : 0;
+    if(g_diary && getenv("GALLOC_VERBOSE")) fprintf(stderr,"[galloc] DIARY (append-only) on\n");
     g_prof = getenv("GALLOC_PROFILE") ? 1 : 0;
     if(g_prof && getenv("GALLOC_VERBOSE")) fprintf(stderr,"[galloc] PROFILE on\n");
     cls_table_init();
