@@ -438,12 +438,14 @@ void* __libc_valloc(size_t n){ return aligned_impl(4096,n); }
 #endif
 void* dlmopen(long ns, const char* file, int mode){
     if(!real_dlmopen){ real_dlmopen=(void*(*)(long,const char*,int))dlsym(RTLD_NEXT,"dlmopen"); if(!real_dlmopen) return NULL; }
+    if(getenv("GALLOC_NO_DLMOPEN")) return real_dlmopen(ns,file,mode);
     if(real_dlmopen && !g_passthrough && (mode & RTLD_DEEPBIND))
         fprintf(stderr,"[galloc] dlmopen: drop DEEPBIND for %s\n", file?file:"?");
     return real_dlmopen(ns, file, g_passthrough? mode : (mode & ~RTLD_DEEPBIND));
 }
 void* dlopen(const char* file, int mode){
     if(!real_dlopen){ real_dlopen=(void*(*)(const char*,int))dlsym(RTLD_NEXT,"dlopen"); if(!real_dlopen) return NULL; }
+    if(getenv("GALLOC_NO_DLMOPEN")) return real_dlopen(file,mode);
     return real_dlopen(file, g_passthrough? mode : (mode & ~RTLD_DEEPBIND));
 }
 
