@@ -18,6 +18,7 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <signal.h>
+#include <ucontext.h>
 #include <sys/time.h>
 
 #define CLASS_MAGIC 0xFA5E0001u
@@ -31,6 +32,7 @@ static const size_t CLASS_SZ[] = {16,32,48,64,96,128,192,256,384,512,768,1024,15
 static size_t g_region = (2u<<20); /* мин. размер региона; GALLOC_REGION_MB */
 static int g_ctor_done = 0;
 static int g_diary = 0;
+static int g_safe = 0;
 
 typedef struct { void* base; size_t cap, off; void* free_head; } Arena;
 static void* volatile g_pend[NCLASS];         /* чужие: lock-free stack */
@@ -302,7 +304,7 @@ static void phase_free(void* p){
         if(!diag && getenv("GALLOC_DIAG")) diag=1;
         if(!leak && getenv("GALLOC_LEAK_FOREIGN")) leak=1;
         if(diag && (fn%2000)==0) fprintf(stderr,"[galloc] foreign-free n=%llu p=%p\n", fn, p);
-        if(leak) return; /* чужой аллокатор движка: не форвардим */
+        if(leak || g_safe) return; /* safe/leak: чужой не форвардим (лучше утечка) */
         /* real_free уже резолвнут в конструкторе: НЕ вызываем dlsym в hot-path
            (dlopen loader-lock reentrancy -> дедлок на загрузке ассетов) */
         if(real_free) real_free(p);
@@ -446,16 +448,31 @@ void* dlopen(const char* file, int mode){
 }
 
 static void fork_child(void){ pthread_mutex_init(&g_lock, NULL); holding=0; lowner=NULL; }
+static void galloc_fault(int sig, siginfo_t* si, void* uc){
+    (void)uc;
+    char b[160]; int p=0;
+    const char* pre="[galloc] FAULT sig="; while(*pre) b[p++]=*pre++;
+    p += wu(b+p, (unsigned long long)sig);
+    const char* a1=" addr=0x"; while(*a1) b[p++]=*a1++;
+    { unsigned long long v=(unsigned long long)(uintptr_t)si->si_addr; char t[20]; int n=0;
+      if(!v){ t[n++]='0'; } while(v){ t[n++]="0123456789abcdef"[v&15]; v>>=4; }
+      for(int i=0;i<n;i++) b[p++]=t[n-1-i]; }
+    const char* a2=" (diag: включи GALLOC_SAFE=1)"; while(*a2) b[p++]=*a2++;
+    b[p++]='\n'; ssize_t wr=write(2,b,(size_t)p); (void)wr;
+    signal(sig, SIG_DFL); raise(sig);
+}
 __attribute__((constructor)) static void atfork_init(void){
     if(getenv("GALLOC_VERBOSE")) fprintf(stderr,"[galloc] loaded pid=%d\n",(int)getpid());
     g_passthrough = getenv("GALLOC_PASSTHROUGH") ? 1 : 0;
     g_diary = getenv("GALLOC_DIARY") ? 1 : 0;
+    g_safe = getenv("GALLOC_SAFE") ? 1 : 0;
     if(g_diary && getenv("GALLOC_VERBOSE")) fprintf(stderr,"[galloc] DIARY (append-only) on\n");
     g_prof = getenv("GALLOC_PROFILE") ? 1 : 0;
     if(g_prof && getenv("GALLOC_VERBOSE")) fprintf(stderr,"[galloc] PROFILE on\n");
     cls_table_init();
     { const char* rm=getenv("GALLOC_REGION_MB");
       if(rm){ long mb=atol(rm); if(mb<1) mb=1; if(mb>64) mb=64; g_region=(size_t)mb<<20; } }
+    if(getenv("GALLOC_DIAG")){ struct sigaction sa; sa.sa_sigaction=galloc_fault; sa.sa_flags=SA_SIGINFO; sigemptyset(&sa.sa_mask); sigaction(SIGSEGV,&sa,NULL); sigaction(SIGABRT,&sa,NULL); }
     if(g_prof){
         atexit(prof_report);
         signal(SIGINT, prof_sig); signal(SIGTERM, prof_sig);
