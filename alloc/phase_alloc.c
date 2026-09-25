@@ -35,8 +35,10 @@ static int g_diary = 0;
 static int g_safe = 0;
 
 typedef struct { void* base; size_t cap, off; void* free_head; } Arena;
-static void* volatile g_pend[NCLASS];         /* чужие: lock-free stack */
-static __thread Arena t_a[NCLASS];            /* приватные арены потока */
+static void* volatile g_pend[NCLASS];         /* свободные блоки класса: lock-free stack */
+static volatile size_t g_pend_ct[NCLASS];
+static Arena g_arena[NCLASS];                 /* ОБЩИЕ арены на класс (RAM-bounded) */
+static __thread void* t_free[NCLASS];         /* приватный кэш свободных блоков потока */
 static __thread int t_id = -1;
 static int g_next_id = 1;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -140,10 +142,9 @@ static void* bump(Arena* a, size_t n, int cls){
         if(n+16 > cap) cap = (n+16 + g_region-1) & ~(g_region-1);
         void* m = mmap(NULL, cap, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
         if(m == MAP_FAILED) return NULL;
-        if(cap >= (2u<<20)) madvise(m, cap, MADV_HUGEPAGE); /* THP: меньше fault/TLB */
         a->base = m; a->cap = cap; a->off = 0;
         treg_add(m, cap, cls);
-        glock(); reg_add(m, cap); gunlock();
+        reg_add(m, cap); /* вызывающий держит g_lock */
     }
     void* p = (char*)a->base + a->off; a->off += n; return p;
 }
@@ -195,19 +196,20 @@ static void* phase_malloc(size_t n){
         size_t need = (n+15)&~(size_t)15; if(need == 0) need = 16;
         if(fr_used+need <= fr_cap){ void* p=(char*)fr_base+fr_used; fr_used+=need; return p; }
     }
-    int id = my_id();
+    int id = my_id(); (void)id;
     int c = class_of(n);
     if(c >= 0){
-        Arena* a = &t_a[c];
-        if(a->free_head){ return pop_node(&a->free_head); }
-        /* забрать чужие из lock-free очереди */
-        void* list = __atomic_exchange_n(&g_pend[c], NULL, __ATOMIC_ACQ_REL);
-        if(list){ a->free_head = list; }
-        if(a->free_head){ return pop_node(&a->free_head); }
-        void* p = bump(a, CLASS_SZ[c]+16, c);
+        if(t_free[c]){ void* p=t_free[c]; t_free[c]=*(void**)p; return p; }
+        if(__atomic_load_n(&g_pend_ct[c], __ATOMIC_RELAXED)){
+            void* list = __atomic_exchange_n(&g_pend[c], NULL, __ATOMIC_ACQ_REL);
+            __atomic_store_n(&g_pend_ct[c], 0, __ATOMIC_RELAXED);
+            if(list){ t_free[c]=*(void**)list; return list; }
+        }
+        glock();
+        void* p = bump(&g_arena[c], CLASS_SZ[c]+16, c);
+        gunlock();
         if(!p) return NULL;
         ((uint64_t*)p)[0] = CLASS_MAGIC|((uint64_t)c<<32);
-        ((uint64_t*)p)[1] = (uint32_t)id;
         return (char*)p+16;
     }
     /* крупный */
@@ -276,11 +278,16 @@ static void phase_free(void* p){
     if(!p) return;
     if(g_diary && fr_base && (char*)p >= (char*)fr_base && (char*)p < (char*)fr_base + fr_used) return; /* надгробие */
     if(fr_depth>0 && (char*)p>=(char*)fr_base && (char*)p<(char*)fr_base+fr_used) return;
-    int me = my_id();
-    /* БЫСТРО: регион этого потока -> класс известен из региона, БЕЗ заголовка */
+    int me = my_id(); (void)me;
+    /* класс из заголовка блока -> в per-thread кэш */
     {
-        int c = in_own_cls(p);
-        if(c >= 0){ *(void**)p = t_a[c].free_head; t_a[c].free_head = p; return; }
+        uint64_t h = *(uint64_t*)((char*)p-16);
+        if((h&0xffffffffu)==CLASS_MAGIC && !(h&LARGE_BIT)){
+            int c = (int)((h>>32)&0xff);
+            if(c>=0 && c<(int)NCLASS){
+                *(void**)p = t_free[c]; t_free[c]=p; return;
+            }
+        }
     }
     /* не наш регион: если это НАШ блок (класс) — lock-free push в pending */
     {
@@ -292,6 +299,7 @@ static void phase_free(void* p){
                 void* head;
                 do { head = g_pend[c2]; *(void**)p = head; }
                 while(!__atomic_compare_exchange_n(&g_pend[c2], &head, p, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+                __atomic_fetch_add(&g_pend_ct[c2], 1, __ATOMIC_RELAXED);
                 return;
             }
         }
@@ -317,9 +325,10 @@ static void phase_free(void* p){
         int c = (int)((h>>32)&0xff); uint32_t own = (uint32_t)*(uint64_t*)((char*)p-8);
         if(c>=0 && c<(int)NCLASS && !(h&FREE_BIT)){
             *((uint64_t*)((char*)p-16)) = CLASS_MAGIC|((uint64_t)c<<32)|FREE_BIT;
-            if(own == (uint32_t)me){ *(void**)p = t_a[c].free_head; t_a[c].free_head = p; }
+            if(own == (uint32_t)me){ *(void**)p = t_free[c]; t_free[c] = p; }
             else { void* hd; do { hd = g_pend[c]; *(void**)p = hd; }
-                   while(!__atomic_compare_exchange_n(&g_pend[c], &hd, p, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)); }
+                   while(!__atomic_compare_exchange_n(&g_pend[c], &hd, p, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+                   __atomic_fetch_add(&g_pend_ct[c], 1, __ATOMIC_RELAXED); }
         }
         gunlock(); return;
     }
