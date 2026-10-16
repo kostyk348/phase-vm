@@ -15,6 +15,9 @@ cargo test        # 18 tests, incl. property fuzz F⁻¹(F(S)) == S
 [![Rust](https://img.shields.io/badge/rust-1.90-orange.svg)]()
 [![deps](https://img.shields.io/badge/dependencies-0-green.svg)]()
 [![release](https://img.shields.io/github/v/release/kostyk348/phase-vm?include_prereleases&label=release)]()
+[![CI](https://github.com/kostyk348/phase-vm/actions/workflows/ci.yml/badge.svg)](https://github.com/kostyk348/phase-vm/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/kostyk348/phase-vm?sort=semver&color=blue)](https://github.com/kostyk348/phase-vm/releases)
+[![Last commit](https://img.shields.io/github/last-commit/kostyk348/phase-vm?branch=main)](https://github.com/kostyk348/phase-vm/commits/main)
 
 ---
 
@@ -53,22 +56,27 @@ cargo build --release
 B=./target/release/phase-vm
 
 # verify + property fuzz a purely reversible kernel
+
 $B check  programs/mixer.phase            # "ЧИСТО обратима"
 $B roundtrip programs/mixer.phase --trials 5000   # F⁻¹(F(S)) == S
 
 # clean compute: c = a + b, temporaries uncomputed to zero
+
 $B run programs/clean.phase --set r0=5 --set r1=7     # → r2=0xc, temp 0
 $B rev programs/clean.phase --set r0=5 --set r1=7     # → kernel unwound, input intact
 
 # transactional memory rollback (#11-flavoured): A→B transfer, abort = reverse
+
 $B run programs/ledger.phase --mem 8      # A=993 B=507
 $B rev programs/ledger.phase --mem 8      # abort → A=1000 B=500
 
 # PC1 cipher (#12-flavoured): decrypt IS the backward run — no separate algorithm
+
 $B cipher --key 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f \
           --pt  0123456789abcdeffedcba987654321000112233445566778899aabbccddeeff
 
 # interactive time-travel debugger (#9-flavoured): f/b/g/c/br/p/pm
+
 $B dbg programs/mixer.phase
 ```
 
@@ -206,7 +214,6 @@ Data-dependent multiply over a 500k-iteration `while` rolls back with a
 single 8-byte decision — the architecture axiom "journal = decisions, never
 state" measured.
 
-
 ## P2: AOT — compile kernels to native code (`src/aot.rs`)
 
 Interpreter ~3.7–16 ns/leaf; generated C (`cc -O2 -shared`) + dlopen:
@@ -215,6 +222,7 @@ Interpreter ~3.7–16 ns/leaf; generated C (`cc -O2 -shared`) + dlopen:
 cargo run --release --example aot_bench
 # forward : native 0.06 ns/leaf | interpreter 6.08 | 94.8×
 # reverse : native 0.09 ns/leaf | interpreter 8.21 | 94.9×
+
 ```
 
 `phase_fwd`/`phase_rev` mirror the reversible semantics; native == interpreter
@@ -230,6 +238,7 @@ boundary-hash → re-forward → state-hash.
 ```bash
 cargo run --release --example capsule
 # капсула: 612 B · верификация OK · финал после миграции == чистый прогон
+
 ```
 
 ## P10: wide lanes AVX2 (`examples/wide_bench.rs`)
@@ -238,7 +247,6 @@ Reversible primitives (xor/add/rot) are componentwise → vectorizable. Measured
 AVX2 vs scalar on reversible xor+rotl passes: correctness asserted
 (AVX2 == scalar); on x86 the autovectorizer already closes most of the gap
 (~1.3× hand-AVX2) — wide gain becomes real at SoA multi-register kernels.
-
 
 ## The paradigm for typical tasks
 
