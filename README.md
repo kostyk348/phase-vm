@@ -15,8 +15,6 @@ cargo test        # 18 tests, incl. property fuzz F⁻¹(F(S)) == S
 [![Rust](https://img.shields.io/badge/rust-1.90-orange.svg)]()
 [![deps](https://img.shields.io/badge/dependencies-0-green.svg)]()
 [![release](https://img.shields.io/github/v/release/kostyk348/phase-vm?include_prereleases&label=release)]()
-[![CI](https://github.com/kostyk348/phase-vm/actions/workflows/ci.yml/badge.svg)](https://github.com/kostyk348/phase-vm/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/kostyk348/phase-vm?sort=semver&color=blue)](https://github.com/kostyk348/phase-vm/releases)
 [![Last commit](https://img.shields.io/github/last-commit/kostyk348/phase-vm?branch=main)](https://github.com/kostyk348/phase-vm/commits/main)
 
 ---
