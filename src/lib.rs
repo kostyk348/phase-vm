@@ -39,6 +39,7 @@ pub mod aot;
 pub mod cap;
 pub mod cipher;
 pub mod ctl;
+pub mod explore;
 pub mod inst;
 pub mod machine;
 pub mod opt;
