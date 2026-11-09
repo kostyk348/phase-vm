@@ -16,6 +16,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use phase_vm::check;
+use phase_vm::explore;
 use phase_vm::inst::Inst;
 use phase_vm::machine::{
     count_leaves, iter_forward, iter_reverse, leaf_at, reverse_all, reverse_n,
@@ -37,6 +38,8 @@ fn usage() -> ! {
          \x20 phase-vm dbg  <file.phase> [--regs N] [--mem N] [--set ...]\n\
          \x20        (интерактивный отладчик: f/b/g/c/p/pm/br/bl/q)\n\
          \x20 phase-vm roundtrip <file.phase> [--regs N] [--mem N] [--trials T] [--seed S]\n\
+         \x20 phase-vm explore <file.phase> [--regs N] [--mem N]\n\
+         \x20        (proof explorer: reversible regions, boundaries, reasons + witnesses)\n\
          \x20 phase-vm bench <file.phase> [--regs N] [--mem N] [--rounds R] [--set ...]\n\
          \x20 phase-vm cipher --key <hex64> --pt <hex64> [--rounds R]\n\
          \x20        (PC1: encrypt=forward, decrypt=backward)\n"
@@ -634,6 +637,127 @@ fn cmd_cipher(_o: &Opts, args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+// ---- proof explorer (e): reversible regions, boundaries, witnesses ----
+
+/// One-line state: only non-zero cells.
+fn state_oneline(s: &State) -> String {
+    let mut parts: Vec<String> = s
+        .regs
+        .iter()
+        .enumerate()
+        .filter(|(_, &v)| v != 0)
+        .map(|(i, v)| format!("r{i}=0x{v:016x}"))
+        .collect();
+    for (i, &v) in s.mem.iter().enumerate() {
+        if v != 0 {
+            parts.push(format!("m[{i}]=0x{v:016x}"));
+        }
+    }
+    if parts.is_empty() {
+        "(all zero)".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn cmd_explore(file: &str, o: &Opts) -> ExitCode {
+    let nodes = read_prog(file, o.regs);
+    let a = explore::Analysis::of(&nodes);
+
+    println!("file: {file}");
+    println!(
+        "leaves: {} (regs: {}, mem words: {}){}",
+        a.total_leaves,
+        o.regs,
+        o.mem,
+        if a.truncated {
+            "  [map truncated: huge rep bodies were not fully expanded]"
+        } else {
+            ""
+        }
+    );
+
+    // Leaf map: maximal reversible regions interleaved with flagged leaves.
+    let mut marks: Vec<(u64, String)> = Vec::new();
+    for r in &a.regions {
+        marks.push((
+            r.start,
+            format!(
+                "reversible region [{}..{})  ({} leaves)",
+                r.start,
+                r.start + r.len,
+                r.len
+            ),
+        ));
+    }
+    for issue in &a.issues {
+        if let Some(inst) = leaf_at(&nodes, issue.leaf) {
+            marks.push((
+                issue.leaf,
+                format!("leaf #{}: {inst}  [{}]", issue.leaf, issue.kind.label()),
+            ));
+        }
+    }
+    marks.sort_by_key(|(pos, _)| *pos);
+    if marks.is_empty() {
+        println!("leaf map: (empty program)");
+    } else {
+        println!("leaf map:");
+        for (_, line) in &marks {
+            println!("  {line}");
+        }
+    }
+
+    let nb = a
+        .issues
+        .iter()
+        .filter(|i| i.kind == explore::IssueKind::Boundary)
+        .count();
+    let na = a.issues.len() - nb;
+    if a.purely_reversible() {
+        println!(
+            "verdict: PURELY REVERSIBLE — F⁻¹∘F = Id over all {} leaves",
+            a.total_leaves
+        );
+        println!("rollback: 0 log bytes, 0 state copies, cost O(steps taken)");
+    } else {
+        println!("verdict: NOT purely reversible — {nb} boundary, {na} aliasing violation(s)");
+    }
+    println!(
+        "reversible suffix (rollback from the end): {} of {} leaves",
+        a.suffix, a.total_leaves
+    );
+
+    if !a.issues.is_empty() {
+        println!();
+        println!("why the non-invertible leaves cannot be inverted:");
+        for issue in &a.issues {
+            let Some(inst) = leaf_at(&nodes, issue.leaf) else {
+                continue;
+            };
+            println!("  leaf #{}: {inst} [{}]", issue.leaf, issue.kind.label());
+            println!("    why: {}", explore::why_not_invertible(&inst));
+            match explore::collision_witness(&inst, o.regs, o.mem) {
+                Some(w) => {
+                    println!(
+                        "    minimal witness (two distinct inputs, one output — not injective):"
+                    );
+                    println!("      in 1: {}", state_oneline(&w.s1));
+                    println!("      in 2: {}", state_oneline(&w.s2));
+                    println!("      out : {}", state_oneline(&w.out));
+                }
+                None if matches!(inst, Inst::MAdd(..) | Inst::MSub(..) | Inst::MXor(..)) => {
+                    println!("    witness: none in bounded search — for index==value the flag is conservative (docs/isa.md, section 5)");
+                }
+                None => {
+                    println!("    witness: none — memory instructions need --mem N (address range) to build one");
+                }
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() {
@@ -651,6 +775,7 @@ fn main() -> ExitCode {
         "rev" => cmd_rev(&file, &o),
         "dbg" => cmd_dbg(&file, &o),
         "roundtrip" => cmd_roundtrip(&file, &o),
+        "explore" => cmd_explore(&file, &o),
         "bench" => cmd_bench(&file, &o),
         _ => usage(),
     }

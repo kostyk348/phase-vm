@@ -1,5 +1,7 @@
 # ⬡ phase-vm
 
+English | [Русский](README.ru.md)
+
 **A reversible register machine.** Every instruction modifies exactly one
 destination; all sources stay intact and are sufficient to invert it. So the
 inverse is always computable from the *current* state — **no logs, no
@@ -7,7 +9,7 @@ checkpoints, zero extra memory**. Running a program `--reverse` unwinds it to
 the last boundary, bit-for-bit.
 
 ```text
-cargo test        # 18 tests, incl. property fuzz F⁻¹(F(S)) == S
+cargo test        # 66 tests, incl. property fuzz F⁻¹(F(S)) == S + shrinker
 ```
 
 [![CI](https://img.shields.io/github/actions/workflow/status/kostyk348/phase-vm/ci.yml?branch=main&label=CI)](https://github.com/kostyk348/phase-vm/actions)
@@ -83,6 +85,7 @@ $B dbg programs/mixer.phase
 | command | purpose |
 |---|---|
 | `check` | classify leaves: invertible / boundary / aliasing; verdict "чисто обратима" |
+| `explore` | proof explorer: reversible regions, boundaries, why-not-invertible + minimal counterexamples |
 | `run` | forward execution |
 | `runrev` | backward execution **from a given state** (no forward first) |
 | `rev [--steps K]` | forward, then unwind K leaves (or the whole reversible suffix) |
@@ -96,6 +99,26 @@ immediates as decimal / `0x…` / `0b…` / negative.
 
 **ISA:** `nop not inc dec xor add sub swp rotl rotr toff cswp` (reversible) ·
 `madd msub mxor rmadd rmsub` (word memory) · `set mset` (boundaries).
+
+Formal specification written from the code: [docs/isa.md](docs/isa.md) —
+machine state, per-instruction pre/postconditions and `inverse`, the
+invertibility table, boundary semantics.
+
+## Honesty / scope
+
+- What is reversible here is **integer state** (`u64` words): every
+  invertible instruction is a bijection on Z/2^64 with a *computed* inverse.
+  That is **not** "reversible physics" — no Hamiltonians, no symplectic
+  integrators, no thermodynamic claims — and it is **not** cryptography:
+  `decrypt = reverse` does not make PC1 secure.
+- "Zero logs" holds **inside a reversible region**. Boundaries (`set`/`mset`)
+  and externally observable effects are exactly where information is paid
+  for (formal statement: [docs/isa.md, §8](docs/isa.md#8-boundary-semantics)).
+- Every claim in this README is backed by tests in this repo (`cargo test`):
+  property fuzzing of `F⁻¹(F(S)) == S` over generated valid programs, a
+  shrinker validated on planted bugs, boundary/rollback semantics, L3
+  journal round-trips. The traceability matrix lives in
+  [docs/isa.md, §9](docs/isa.md#9-what-the-tests-verify-traceability).
 
 ## Measured (release, i7-class)
 
