@@ -69,7 +69,7 @@ impl Arena {
     /// Откат к метке (байты): всё, что выделено после неё, исчезает за O(1).
     /// Метки выше target снимаются.
     pub fn rollback(&mut self, mark_bytes: usize) {
-        debug_assert!(mark_bytes.is_multiple_of(8));
+        debug_assert!(mark_bytes % 8 == 0);
         let words = mark_bytes / 8;
         debug_assert!(words <= self.buf.len(), "rollback за пределы арены");
         self.buf.truncate(words);
@@ -100,12 +100,12 @@ impl Arena {
     }
 
     pub fn write_u64(&mut self, off_bytes: usize, v: u64) {
-        debug_assert!(off_bytes.is_multiple_of(8));
+        debug_assert!(off_bytes % 8 == 0);
         self.buf[off_bytes / 8] = v;
     }
 
     pub fn read_u64(&self, off_bytes: usize) -> u64 {
-        debug_assert!(off_bytes.is_multiple_of(8));
+        debug_assert!(off_bytes % 8 == 0);
         self.buf[off_bytes / 8]
     }
 

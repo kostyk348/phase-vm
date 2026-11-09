@@ -75,7 +75,7 @@ fn run_units(kv: &mut KV, start: usize, end: usize, chain: &mut u64, rng: &mut X
         // юнит = фаза: команда + валидация (аудит после каждого юнита)
         let k = KEYS[(rng.next() % KEYS.len() as u64) as usize];
         let v = (rng.next() % 1000).to_string();
-        if rng.next().is_multiple_of(5) {
+        if rng.next() % 5 == 0 {
             kv.handle(&format!("DEL {k}"));
         } else {
             kv.handle(&format!("SET {k} {v}"));
@@ -115,7 +115,7 @@ fn main() {
         let end = end.min(crash_at);
         run_units(&mut kv, i, end, &mut chain, &mut rng);
         // валидация и капсула на границе
-        if end.is_multiple_of(CP_EVERY) {
+        if end % CP_EVERY == 0 {
             write_capsule(&dir, end, kv.audit_digest(), &kv);
             checkpointed += 1;
             last_cp_unit = end;
