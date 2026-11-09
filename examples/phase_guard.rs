@@ -1,3 +1,5 @@
+#![allow(clippy::manual_is_multiple_of)]
+
 //! phase-guard — глубокий системный слой: краш-консистентный
 //! детерминированный stateful-процесс БЕЗ WAL.
 //!

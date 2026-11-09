@@ -1,3 +1,5 @@
+#![allow(clippy::manual_is_multiple_of)]
+
 //! Прививка из DSO Control: **ensemble-стабильность** в обратимом тике.
 //!
 //! DSO Control (незакрытая нить: ensemble fitness был Python-only) дал урок:

@@ -1,3 +1,5 @@
+#![allow(clippy::manual_is_multiple_of)]
+
 //! phase-etl — реальный ETL-инструмент целиком в парадигме PHASE.
 //!
 //! Пайплайн над CSV:
