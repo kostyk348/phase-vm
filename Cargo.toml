@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Phase-VM — обратимая регистровая машина (POC-1 обратимой парадигмы). Биективные инструкции с обратными, модель фазы/границы, reverse без логов."
 license = "MIT"
+repository = "https://github.com/kostyk348/phase-vm"
+readme = "README.md"
+homepage = "https://github.com/kostyk348/phase-vm"
+keywords = ["reversible-computing", "virtual-machine", "interpreter", "bijection"]
+categories = ["compilers", "emulators"]
 
 [lib]
 name = "phase_vm"
