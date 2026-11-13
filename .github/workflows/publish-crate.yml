@@ -1,0 +1,34 @@
+name: Publish crate
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check for a crates.io token
+        id: guard
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "No CARGO_REGISTRY_TOKEN secret — skipping the publish."
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: cargo publish
+        if: steps.guard.outputs.skip != '1'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -e
+          cargo publish --token "$CARGO_REGISTRY_TOKEN"
