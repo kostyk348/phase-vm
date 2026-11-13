@@ -1,6 +1,22 @@
+<div align="center">
+
+<img src="docs/banner.svg" alt="phase-vm banner" width="1000">
+
 # ⬡ phase-vm
 
-English | [Русский](README.ru.md)
+### English | [Русский](README.ru.md)
+
+[![CI](https://img.shields.io/github/actions/workflow/status/kostyk348/phase-vm/ci.yml?branch=main&label=CI)](https://github.com/kostyk348/phase-vm/actions)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.90-orange.svg)]()
+[![deps](https://img.shields.io/badge/dependencies-0-green.svg)]()
+[![release](https://img.shields.io/github/v/release/kostyk348/phase-vm?include_prereleases&label=release)]()
+[![Last commit](https://img.shields.io/github/last-commit/kostyk348/phase-vm?branch=main)](https://github.com/kostyk348/phase-vm/commits/main)
+
+</div>
+
+---
+
 
 **A reversible register machine.** Every instruction modifies exactly one
 destination; all sources stay intact and are sufficient to invert it. So the
