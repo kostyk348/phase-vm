@@ -28,12 +28,6 @@ the last boundary, bit-for-bit.
 cargo test        # 66 tests, incl. property fuzz F⁻¹(F(S)) == S + shrinker
 ```
 
-[![CI](https://img.shields.io/github/actions/workflow/status/kostyk348/phase-vm/ci.yml?branch=main&label=CI)](https://github.com/kostyk348/phase-vm/actions)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.90-orange.svg)]()
-[![deps](https://img.shields.io/badge/dependencies-0-green.svg)]()
-[![release](https://img.shields.io/github/v/release/kostyk348/phase-vm?include_prereleases&label=release)]()
-[![Last commit](https://img.shields.io/github/last-commit/kostyk348/phase-vm?branch=main)](https://github.com/kostyk348/phase-vm/commits/main)
 
 ---
 
