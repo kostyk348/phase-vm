@@ -93,8 +93,8 @@ pub fn fmt_mem(state: &State, max: usize) -> String {
     }
     let shown = n.min(max);
     let mut s = String::new();
-    for i in 0..shown {
-        s.push_str(&format!("m[{}]=0x{:016x} ", i, state.mem[i]));
+    for (i, w) in state.mem.iter().enumerate().take(shown) {
+        s.push_str(&format!("m[{}]=0x{:016x} ", i, w));
     }
     if n > shown {
         s.push_str(&format!("… (всего {} слов)", n));
