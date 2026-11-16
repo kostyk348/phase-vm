@@ -496,8 +496,8 @@ fn buggy_roundtrip_prop(prog: &[Inst]) -> bool {
     let mut rng = Xs(0x5EED_0001);
     for _ in 0..3 {
         let mut s = State::random(8, NMEM, rng.next());
-        for r in 0..6 {
-            s.regs[r] |= 1;
+        for reg in s.regs.iter_mut().take(6) {
+            *reg |= 1;
         }
         for (p, &r) in addr_regs(8).iter().enumerate() {
             s.regs[r as usize] = (1 + p) as u64;
